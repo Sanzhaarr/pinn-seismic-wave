@@ -1,0 +1,2 @@
+mode,source_file,MSE,MAE,Relative_L2_Error,NRMSE,Reference_Max_Amplitude,PINN_Max_Amplitude,training_time_seconds
+real,data/real/real_section.sgy,0.055826328694820404,0.17416563630104065,0.9453963041305542,0.23627595603466034,1.0,0.8440563082695007,205.60625410079956

@@ -1,34 +1,58 @@
-import torch
+import os
+
 import numpy as np
+import torch
 from tqdm import tqdm
 
 from src.config import *
+from src.fdm_solver import ricker_wavelet
 from src.pinn_model import SeismicPINN
 
 
 def interpolate_velocity(x, z):
     """
-    Analytical version of the same heterogeneous velocity model.
-    This avoids complicated interpolation inside the PINN.
+    Analytical torch version of the synthetic heterogeneous velocity model.
+
+    This must match src.fdm_solver.create_velocity_model as closely as possible,
+    because the PDE residual uses this velocity model during PINN training.
     """
-    c = torch.ones_like(x)
+    transition = 0.5 * (1.0 + torch.tanh((z - 0.5) / 0.025))
+    c = (1.0 - transition) * 1.0 + transition * 1.5
 
-    # Layer
-    c = torch.where(z > 0.5, torch.tensor(1.5, device=x.device), c)
-
-    # Circular anomaly
     anomaly = (x - 0.65) ** 2 + (z - 0.35) ** 2 < 0.08 ** 2
-    c = torch.where(anomaly, torch.tensor(2.0, device=x.device), c)
+    c = torch.where(anomaly, torch.tensor(2.0, dtype=x.dtype, device=x.device), c)
 
     return c
 
 
-def pde_residual(model, xzt):
+def source_term(x, z, t):
     """
-    Computes residual:
-    u_tt - c(x,z)^2 * (u_xx + u_zz) = 0
+    Smooth differentiable approximation of the point source used by the FDM solver.
+
+    The finite-difference solver injects the Ricker source at one grid point. For the
+    continuous PINN residual, a narrow Gaussian spatial source is used instead.
     """
-    xzt.requires_grad_(True)
+    sigma = 0.025
+    spatial = torch.exp(-((x - SOURCE_X) ** 2 + (z - SOURCE_Z) ** 2) / (2.0 * sigma ** 2))
+
+    pi2 = torch.pi ** 2
+    tau2 = (t - SOURCE_T0) ** 2
+    temporal = SOURCE_AMPLITUDE * (1.0 - 2.0 * pi2 * SOURCE_FREQUENCY ** 2 * tau2) * torch.exp(
+        -pi2 * SOURCE_FREQUENCY ** 2 * tau2
+    )
+
+    return spatial * temporal
+
+
+def pde_residual(model, xzt, include_source=True):
+    """
+    Compute the acoustic wave-equation residual:
+
+        u_tt - c(x,z)^2 (u_xx + u_zz) - s(x,z,t) = 0
+
+    If include_source is False, the homogeneous residual is used.
+    """
+    xzt = xzt.clone().detach().requires_grad_(True)
 
     u = model(xzt)
 
@@ -36,7 +60,7 @@ def pde_residual(model, xzt):
         u,
         xzt,
         grad_outputs=torch.ones_like(u),
-        create_graph=True
+        create_graph=True,
     )[0]
 
     u_x = grads[:, 0:1]
@@ -47,115 +71,164 @@ def pde_residual(model, xzt):
         u_x,
         xzt,
         grad_outputs=torch.ones_like(u_x),
-        create_graph=True
+        create_graph=True,
     )[0][:, 0:1]
 
     u_zz = torch.autograd.grad(
         u_z,
         xzt,
         grad_outputs=torch.ones_like(u_z),
-        create_graph=True
+        create_graph=True,
     )[0][:, 1:2]
 
     u_tt = torch.autograd.grad(
         u_t,
         xzt,
         grad_outputs=torch.ones_like(u_t),
-        create_graph=True
+        create_graph=True,
     )[0][:, 2:3]
 
     x = xzt[:, 0:1]
     z = xzt[:, 1:2]
+    time = xzt[:, 2:3]
     c = interpolate_velocity(x, z)
 
     residual = u_tt - c ** 2 * (u_xx + u_zz)
+    if include_source:
+        residual = residual - source_term(x, z, time)
 
     return residual
 
 
 def prepare_training_data(x, z, t, u_fdm):
     """
-    Samples data points from FDM solution.
+    Sample supervised data points from the FDM solution.
+
+    Half of the points are sampled from high-amplitude regions and half are sampled
+    uniformly. This keeps important wavefronts while still covering quiet regions.
     """
-    nx = len(x)
-    nz = len(z)
-    nt = len(t)
+    flat_abs = np.abs(u_fdm).reshape(-1)
+    all_indices = np.arange(flat_abs.size)
 
-    # Data points from reference FDM
-    idx_x = np.random.randint(0, nx, N_DATA)
-    idx_z = np.random.randint(0, nz, N_DATA)
-    idx_t = np.random.randint(0, nt, N_DATA)
+    n_high = N_DATA // 2
+    n_uniform = N_DATA - n_high
 
-    data_xzt = np.stack([
-        x[idx_x],
-        z[idx_z],
-        t[idx_t]
-    ], axis=1)
+    threshold = np.percentile(flat_abs, 75)
+    high_amplitude_indices = np.where(flat_abs >= threshold)[0]
 
+    if len(high_amplitude_indices) == 0:
+        high_amplitude_indices = all_indices
+
+    chosen_high = np.random.choice(high_amplitude_indices, size=n_high, replace=True)
+    chosen_uniform = np.random.choice(all_indices, size=n_uniform, replace=True)
+    chosen = np.concatenate([chosen_high, chosen_uniform])
+    np.random.shuffle(chosen)
+
+    idx_t, idx_x, idx_z = np.unravel_index(chosen, u_fdm.shape)
+
+    data_xzt = np.stack([x[idx_x], z[idx_z], t[idx_t]], axis=1)
     data_u = u_fdm[idx_t, idx_x, idx_z].reshape(-1, 1)
 
-    data_xzt = torch.tensor(data_xzt, dtype=torch.float32).to(DEVICE)
-    data_u = torch.tensor(data_u, dtype=torch.float32).to(DEVICE)
+    data_xzt = torch.tensor(data_xzt, dtype=torch.float32, device=DEVICE)
+    data_u = torch.tensor(data_u, dtype=torch.float32, device=DEVICE)
 
     return data_xzt, data_u
 
 
+def sample_collocation_points():
+    x_c = torch.rand(N_COLLOCATION, 1, device=DEVICE)
+    z_c = torch.rand(N_COLLOCATION, 1, device=DEVICE)
+    t_c = torch.rand(N_COLLOCATION, 1, device=DEVICE) * T_MAX
+    return torch.cat([x_c, z_c, t_c], dim=1)
+
+
+def sample_initial_points():
+    x_i = torch.rand(N_INITIAL, 1, device=DEVICE)
+    z_i = torch.rand(N_INITIAL, 1, device=DEVICE)
+    t_i = torch.zeros(N_INITIAL, 1, device=DEVICE)
+    return torch.cat([x_i, z_i, t_i], dim=1)
+
+
+def sample_boundary_points():
+    n_b = max(1, N_BOUNDARY // 4)
+    tb = torch.rand(n_b, 1, device=DEVICE) * T_MAX
+
+    xb0 = torch.zeros(n_b, 1, device=DEVICE)
+    xb1 = torch.ones(n_b, 1, device=DEVICE)
+    zb = torch.rand(n_b, 1, device=DEVICE)
+
+    zb0 = torch.zeros(n_b, 1, device=DEVICE)
+    zb1 = torch.ones(n_b, 1, device=DEVICE)
+    xb = torch.rand(n_b, 1, device=DEVICE)
+
+    b1 = torch.cat([xb0, zb, tb], dim=1)
+    b2 = torch.cat([xb1, zb, tb], dim=1)
+    b3 = torch.cat([xb, zb0, tb], dim=1)
+    b4 = torch.cat([xb, zb1, tb], dim=1)
+
+    return torch.cat([b1, b2, b3, b4], dim=0)
+
+
+def build_model():
+    return SeismicPINN(
+        use_fourier=USE_FOURIER_FEATURES,
+        mapping_size=FOURIER_MAPPING_SIZE,
+        fourier_scale=FOURIER_SCALE,
+        hidden_dim=HIDDEN_DIM,
+        depth=NETWORK_DEPTH,
+        activation=ACTIVATION,
+    ).to(DEVICE)
+
+
 def train_pinn(x, z, t, u_fdm):
-    model = SeismicPINN(use_fourier=True).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    torch.manual_seed(RANDOM_SEED)
+    np.random.seed(RANDOM_SEED)
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+    model = build_model()
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=WEIGHT_DECAY,
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.5,
+        patience=300,
+    )
 
     data_xzt, data_u = prepare_training_data(x, z, t, u_fdm)
+    print(f"Training data amplitude range: min={data_u.min().item():.6e}, max={data_u.max().item():.6e}")
+    print(f"PINN training device: {DEVICE}")
 
-    loss_history = []
+    loss_history = {
+        "total": [],
+        "pde": [],
+        "data": [],
+        "ic": [],
+        "bc": [],
+        "lr": [],
+    }
 
     for epoch in tqdm(range(EPOCHS), desc="Training PINN"):
-        optimizer.zero_grad()
+        model.train()
+        optimizer.zero_grad(set_to_none=True)
 
-        # Collocation points
-        x_c = torch.rand(N_COLLOCATION, 1).to(DEVICE)
-        z_c = torch.rand(N_COLLOCATION, 1).to(DEVICE)
-        t_c = torch.rand(N_COLLOCATION, 1).to(DEVICE) * T_MAX
-        xzt_c = torch.cat([x_c, z_c, t_c], dim=1)
-
-        residual = pde_residual(model, xzt_c)
+        xzt_c = sample_collocation_points()
+        residual = pde_residual(model, xzt_c, include_source=True)
         loss_pde = torch.mean(residual ** 2)
 
-        # Data loss
         pred_data = model(data_xzt)
         loss_data = torch.mean((pred_data - data_u) ** 2)
 
-        # Initial condition: u(x,z,0) = 0
-        x_i = torch.rand(N_INITIAL, 1).to(DEVICE)
-        z_i = torch.rand(N_INITIAL, 1).to(DEVICE)
-        t_i = torch.zeros(N_INITIAL, 1).to(DEVICE)
-        xzt_i = torch.cat([x_i, z_i, t_i], dim=1)
+        xzt_i = sample_initial_points()
         pred_i = model(xzt_i)
         loss_ic = torch.mean(pred_i ** 2)
 
-        # Boundary condition: u = 0 at boundaries
-        n_b = N_BOUNDARY // 4
-        tb = torch.rand(n_b, 1).to(DEVICE) * T_MAX
-
-        xb0 = torch.zeros(n_b, 1).to(DEVICE)
-        xb1 = torch.ones(n_b, 1).to(DEVICE)
-        zb = torch.rand(n_b, 1).to(DEVICE)
-
-        zb0 = torch.zeros(n_b, 1).to(DEVICE)
-        zb1 = torch.ones(n_b, 1).to(DEVICE)
-        xb = torch.rand(n_b, 1).to(DEVICE)
-
-        b1 = torch.cat([xb0, zb, tb], dim=1)
-        b2 = torch.cat([xb1, zb, tb], dim=1)
-        b3 = torch.cat([xb, zb0, tb], dim=1)
-        b4 = torch.cat([xb, zb1, tb], dim=1)
-
-        pred_b = torch.cat([
-            model(b1),
-            model(b2),
-            model(b3),
-            model(b4)
-        ], dim=0)
-
+        xzt_b = sample_boundary_points()
+        pred_b = model(xzt_b)
         loss_bc = torch.mean(pred_b ** 2)
 
         loss = (
@@ -166,32 +239,86 @@ def train_pinn(x, z, t, u_fdm):
         )
 
         loss.backward()
+
+        if GRADIENT_CLIP_NORM is not None and GRADIENT_CLIP_NORM > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), GRADIENT_CLIP_NORM)
+
         optimizer.step()
+        scheduler.step(loss.detach())
 
-        loss_history.append(loss.item())
+        loss_history["total"].append(float(loss.detach().cpu()))
+        loss_history["pde"].append(float(loss_pde.detach().cpu()))
+        loss_history["data"].append(float(loss_data.detach().cpu()))
+        loss_history["ic"].append(float(loss_ic.detach().cpu()))
+        loss_history["bc"].append(float(loss_bc.detach().cpu()))
+        loss_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
-        if epoch % 500 == 0:
+        if epoch % 500 == 0 or epoch == EPOCHS - 1:
             print(
                 f"Epoch {epoch} | "
                 f"Total: {loss.item():.6e} | "
                 f"PDE: {loss_pde.item():.6e} | "
-                f"Data: {loss_data.item():.6e}"
+                f"Data: {loss_data.item():.6e} | "
+                f"IC: {loss_ic.item():.6e} | "
+                f"BC: {loss_bc.item():.6e} | "
+                f"LR: {optimizer.param_groups[0]['lr']:.2e}"
             )
 
-    torch.save(model.state_dict(), "results/data/pinn_model.pt")
+    if USE_LBFGS_REFINEMENT:
+        _run_lbfgs_refinement(model, data_xzt, data_u, loss_history)
+
+    torch.save(model.state_dict(), f"{DATA_DIR}/pinn_model.pt")
 
     return model, loss_history
 
 
+def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
+    optimizer = torch.optim.LBFGS(
+        model.parameters(),
+        lr=0.5,
+        max_iter=LBFGS_MAX_ITER,
+        history_size=50,
+        line_search_fn="strong_wolfe",
+    )
+
+    def closure():
+        optimizer.zero_grad(set_to_none=True)
+
+        xzt_c = sample_collocation_points()
+        residual = pde_residual(model, xzt_c, include_source=True)
+        loss_pde = torch.mean(residual ** 2)
+
+        pred_data = model(data_xzt)
+        loss_data = torch.mean((pred_data - data_u) ** 2)
+
+        xzt_i = sample_initial_points()
+        loss_ic = torch.mean(model(xzt_i) ** 2)
+
+        xzt_b = sample_boundary_points()
+        loss_bc = torch.mean(model(xzt_b) ** 2)
+
+        loss = (
+            LAMBDA_PDE * loss_pde
+            + LAMBDA_DATA * loss_data
+            + LAMBDA_IC * loss_ic
+            + LAMBDA_BC * loss_bc
+        )
+        loss.backward()
+        return loss
+
+    final_loss = optimizer.step(closure)
+    loss_history["total"].append(float(final_loss.detach().cpu()))
+
+
 def predict_snapshot(model, time_value, nx=NX, nz=NZ):
-    x = np.linspace(X_MIN, X_MAX, nx)
-    z = np.linspace(Z_MIN, Z_MAX, nz)
+    x = np.linspace(X_MIN, X_MAX, nx, dtype=np.float32)
+    z = np.linspace(Z_MIN, Z_MAX, nz, dtype=np.float32)
 
     X, Z = np.meshgrid(x, z, indexing="ij")
-    T = np.ones_like(X) * time_value
+    T = np.ones_like(X, dtype=np.float32) * time_value
 
     xzt = np.stack([X.flatten(), Z.flatten(), T.flatten()], axis=1)
-    xzt_tensor = torch.tensor(xzt, dtype=torch.float32).to(DEVICE)
+    xzt_tensor = torch.tensor(xzt, dtype=torch.float32, device=DEVICE)
 
     model.eval()
     with torch.no_grad():

@@ -47,6 +47,36 @@ def normalized_rmse(pred, true):
     return float(np.sqrt(np.mean((pred - true) ** 2)) / scale)
 
 
+def normalized_mae(pred, true):
+    pred, true = _as_float_arrays(pred, true)
+    scale = np.max(np.abs(true))
+    if scale < EPS:
+        return np.nan
+    return float(np.mean(np.abs(pred - true)) / scale)
+
+
+def relative_max_error(pred, true):
+    pred, true = _as_float_arrays(pred, true)
+    scale = np.max(np.abs(true))
+    if scale < EPS:
+        return np.nan
+    return float(np.max(np.abs(pred - true)) / scale)
+
+
+def energy_ratio(pred, true):
+    pred, true = _as_float_arrays(pred, true)
+    true_energy = np.sum(true ** 2)
+    if true_energy < EPS:
+        return np.nan
+    pred_energy = np.sum(pred ** 2)
+    return float(pred_energy / true_energy)
+
+
+def mean_bias(pred, true):
+    pred, true = _as_float_arrays(pred, true)
+    return float(np.mean(pred - true))
+
+
 def peak_signal_to_noise_ratio(pred, true):
     pred, true = _as_float_arrays(pred, true)
     mse = np.mean((pred - true) ** 2)
@@ -81,8 +111,12 @@ def compute_all_metrics(pred, true):
         "MAE": mae_error(pred, true),
         "Relative_L2_Error": relative_l2_error(pred, true),
         "NRMSE": normalized_rmse(pred, true),
+        "NMAE": normalized_mae(pred, true),
+        "Relative_Max_Error": relative_max_error(pred, true),
         "PSNR_dB": peak_signal_to_noise_ratio(pred, true),
         "Correlation": correlation_coefficient(pred, true),
+        "Energy_Ratio": energy_ratio(pred, true),
+        "Mean_Bias": mean_bias(pred, true),
         "Reference_Max_Abs": max_abs_value(true),
         "Prediction_Max_Abs": max_abs_value(pred),
         "Error_Max_Abs": max_abs_value(np.asarray(pred) - np.asarray(true)),

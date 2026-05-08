@@ -5,7 +5,7 @@ import torch
 from tqdm import tqdm
 
 from src.config import *
-from src.fdm_solver import ricker_wavelet
+
 from src.pinn_model import SeismicPINN
 
 
@@ -25,35 +25,20 @@ def interpolate_velocity(x, z):
     return c
 
 
-def source_term(x, z, t):
+
+
+def pde_residual(model, xzt):
     """
-    Smooth differentiable approximation of the point source used by the FDM solver.
+    Compute the homogeneous acoustic wave-equation residual:
 
-    The finite-difference solver injects the Ricker source at one grid point. For the
-    continuous PINN residual, a narrow Gaussian spatial source is used instead.
-    """
-    sigma = 0.025
-    spatial = torch.exp(-((x - SOURCE_X) ** 2 + (z - SOURCE_Z) ** 2) / (2.0 * sigma ** 2))
+        u_tt - c(x,z)^2 (u_xx + u_zz) = 0
 
-    pi2 = torch.pi ** 2
-    tau2 = (t - SOURCE_T0) ** 2
-    temporal = SOURCE_AMPLITUDE * (1.0 - 2.0 * pi2 * SOURCE_FREQUENCY ** 2 * tau2) * torch.exp(
-        -pi2 * SOURCE_FREQUENCY ** 2 * tau2
-    )
-
-    return spatial * temporal
-
-
-def pde_residual(model, xzt, include_source=True):
-    """
-    Compute the acoustic wave-equation residual:
-
-        u_tt - c(x,z)^2 (u_xx + u_zz) - s(x,z,t) = 0
-
-    If include_source is False, the homogeneous residual is used.
+    In this project, the source-generated wavefield is learned primarily from the
+    FDM data term. The PDE residual is kept as a weak regularizer so that the neural
+    approximation remains wave-equation-like without allowing the source term to
+    dominate optimization.
     """
     xzt = xzt.clone().detach().requires_grad_(True)
-
     u = model(xzt)
 
     grads = torch.autograd.grad(
@@ -90,17 +75,19 @@ def pde_residual(model, xzt, include_source=True):
 
     x = xzt[:, 0:1]
     z = xzt[:, 1:2]
-    time = xzt[:, 2:3]
     c = interpolate_velocity(x, z)
 
-    residual = u_tt - c ** 2 * (u_xx + u_zz)
-    if include_source:
-        residual = residual - source_term(x, z, time)
+    return u_tt - c ** 2 * (u_xx + u_zz)
 
-    return residual
+def get_reference_scale(u_fdm):
+    """Return a stable amplitude scale for normalizing the FDM wavefield."""
+    scale = float(np.max(np.abs(u_fdm)))
+    if not np.isfinite(scale) or scale <= 0.0:
+        return 1.0
+    return scale
 
 
-def prepare_training_data(x, z, t, u_fdm):
+def prepare_training_data(x, z, t, u_fdm, reference_scale):
     """
     Sample supervised data points from the FDM solution.
 
@@ -113,7 +100,7 @@ def prepare_training_data(x, z, t, u_fdm):
     n_high = N_DATA // 2
     n_uniform = N_DATA - n_high
 
-    threshold = np.percentile(flat_abs, 75)
+    threshold = np.percentile(flat_abs, 70)
     high_amplitude_indices = np.where(flat_abs >= threshold)[0]
 
     if len(high_amplitude_indices) == 0:
@@ -127,7 +114,7 @@ def prepare_training_data(x, z, t, u_fdm):
     idx_t, idx_x, idx_z = np.unravel_index(chosen, u_fdm.shape)
 
     data_xzt = np.stack([x[idx_x], z[idx_z], t[idx_t]], axis=1)
-    data_u = u_fdm[idx_t, idx_x, idx_z].reshape(-1, 1)
+    data_u = u_fdm[idx_t, idx_x, idx_z].reshape(-1, 1) / reference_scale
 
     data_xzt = torch.tensor(data_xzt, dtype=torch.float32, device=DEVICE)
     data_u = torch.tensor(data_u, dtype=torch.float32, device=DEVICE)
@@ -169,9 +156,9 @@ def sample_boundary_points():
     return torch.cat([b1, b2, b3, b4], dim=0)
 
 
-def build_model():
+def build_model(use_fourier=USE_FOURIER_FEATURES):
     return SeismicPINN(
-        use_fourier=USE_FOURIER_FEATURES,
+        use_fourier=use_fourier,
         mapping_size=FOURIER_MAPPING_SIZE,
         fourier_scale=FOURIER_SCALE,
         hidden_dim=HIDDEN_DIM,
@@ -180,13 +167,28 @@ def build_model():
     ).to(DEVICE)
 
 
-def train_pinn(x, z, t, u_fdm):
+def train_pinn(
+    x,
+    z,
+    t,
+    u_fdm,
+    experiment_name="full",
+    use_fourier=USE_FOURIER_FEATURES,
+    lambda_pde=LAMBDA_PDE,
+    epochs=None,
+):
     torch.manual_seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    model = build_model()
+    num_epochs = EPOCHS if epochs is None else int(epochs)
+    reference_scale = get_reference_scale(u_fdm)
+
+    model = build_model(use_fourier=use_fourier)
+    model.reference_scale = reference_scale
+    model.experiment_name = experiment_name
+
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=LEARNING_RATE,
@@ -196,11 +198,13 @@ def train_pinn(x, z, t, u_fdm):
         optimizer,
         mode="min",
         factor=0.5,
-        patience=300,
+        patience=250,
     )
 
-    data_xzt, data_u = prepare_training_data(x, z, t, u_fdm)
-    print(f"Training data amplitude range: min={data_u.min().item():.6e}, max={data_u.max().item():.6e}")
+    data_xzt, data_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
+    print(f"Experiment: {experiment_name}")
+    print(f"Reference scale used for normalized training: {reference_scale:.6e}")
+    print(f"Normalized training data range: min={data_u.min().item():.6e}, max={data_u.max().item():.6e}")
     print(f"PINN training device: {DEVICE}")
 
     loss_history = {
@@ -212,12 +216,12 @@ def train_pinn(x, z, t, u_fdm):
         "lr": [],
     }
 
-    for epoch in tqdm(range(EPOCHS), desc="Training PINN"):
+    for epoch in tqdm(range(num_epochs), desc=f"Training PINN [{experiment_name}]"):
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
         xzt_c = sample_collocation_points()
-        residual = pde_residual(model, xzt_c, include_source=True)
+        residual = pde_residual(model, xzt_c)
         loss_pde = torch.mean(residual ** 2)
 
         pred_data = model(data_xzt)
@@ -232,7 +236,7 @@ def train_pinn(x, z, t, u_fdm):
         loss_bc = torch.mean(pred_b ** 2)
 
         loss = (
-            LAMBDA_PDE * loss_pde
+            lambda_pde * loss_pde
             + LAMBDA_DATA * loss_data
             + LAMBDA_IC * loss_ic
             + LAMBDA_BC * loss_bc
@@ -253,7 +257,7 @@ def train_pinn(x, z, t, u_fdm):
         loss_history["bc"].append(float(loss_bc.detach().cpu()))
         loss_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
-        if epoch % 500 == 0 or epoch == EPOCHS - 1:
+        if epoch % 250 == 0 or epoch == num_epochs - 1:
             print(
                 f"Epoch {epoch} | "
                 f"Total: {loss.item():.6e} | "
@@ -267,7 +271,17 @@ def train_pinn(x, z, t, u_fdm):
     if USE_LBFGS_REFINEMENT:
         _run_lbfgs_refinement(model, data_xzt, data_u, loss_history)
 
-    torch.save(model.state_dict(), f"{DATA_DIR}/pinn_model.pt")
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "reference_scale": reference_scale,
+            "experiment_name": experiment_name,
+            "use_fourier": use_fourier,
+            "lambda_pde": lambda_pde,
+            "config_version": CONFIG_VERSION,
+        },
+        f"{DATA_DIR}/pinn_model_{experiment_name}.pt",
+    )
 
     return model, loss_history
 
@@ -285,7 +299,7 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
         optimizer.zero_grad(set_to_none=True)
 
         xzt_c = sample_collocation_points()
-        residual = pde_residual(model, xzt_c, include_source=True)
+        residual = pde_residual(model, xzt_c)
         loss_pde = torch.mean(residual ** 2)
 
         pred_data = model(data_xzt)
@@ -298,7 +312,7 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
         loss_bc = torch.mean(model(xzt_b) ** 2)
 
         loss = (
-            LAMBDA_PDE * loss_pde
+            getattr(model, "lambda_pde", LAMBDA_PDE) * loss_pde
             + LAMBDA_DATA * loss_data
             + LAMBDA_IC * loss_ic
             + LAMBDA_BC * loss_bc
@@ -308,6 +322,21 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
 
     final_loss = optimizer.step(closure)
     loss_history["total"].append(float(final_loss.detach().cpu()))
+
+
+def evaluate_pde_residual(model, n_points=5000):
+    """Evaluate PDE residual statistics on unseen random collocation points."""
+    model.eval()
+    xzt_c = sample_collocation_points()
+    if xzt_c.shape[0] > n_points:
+        xzt_c = xzt_c[:n_points]
+    residual = pde_residual(model, xzt_c)
+    values = residual.detach().cpu().numpy().reshape(-1)
+    return {
+        "Residual_MAE": float(np.mean(np.abs(values))),
+        "Residual_RMSE": float(np.sqrt(np.mean(values ** 2))),
+        "Residual_MaxAbs": float(np.max(np.abs(values))),
+    }
 
 
 def predict_snapshot(model, time_value, nx=NX, nz=NZ):
@@ -324,4 +353,5 @@ def predict_snapshot(model, time_value, nx=NX, nz=NZ):
     with torch.no_grad():
         pred = model(xzt_tensor).cpu().numpy().reshape(nx, nz)
 
-    return pred
+    reference_scale = getattr(model, "reference_scale", 1.0)
+    return pred * reference_scale

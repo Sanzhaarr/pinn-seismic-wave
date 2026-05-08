@@ -38,28 +38,33 @@ def ricker_wavelet(t, f0=SOURCE_FREQUENCY, t0=SOURCE_T0, amplitude=SOURCE_AMPLIT
     return amplitude * (1.0 - 2.0 * pi2 * f0 ** 2 * tau2) * np.exp(-pi2 * f0 ** 2 * tau2)
 
 
-def create_velocity_model(nx=NX, nz=NZ):
+def create_velocity_model(nx=NX, nz=NZ, model_type="heterogeneous"):
     """
-    Create a simple heterogeneous velocity model.
+    Create a velocity model for the FDM simulation.
 
-    The model contains:
-    1. a slower upper layer,
-    2. a faster lower layer,
-    3. a circular high-velocity anomaly.
+    Parameters
+    ----------
+    nx, nz : int
+        Number of grid points in the x and z directions.
+    model_type : str
+        "heterogeneous" for the main layered/anomaly model.
+        "homogeneous" for a simple constant-velocity baseline.
 
-    This structure is simple enough for a dissertation prototype but still clearly
-    demonstrates propagation in a heterogeneous medium.
+    The homogeneous model is useful as a baseline in the dissertation because it
+    shows what is lost when subsurface heterogeneity is ignored.
     """
     x = np.linspace(X_MIN, X_MAX, nx, dtype=np.float32)
     z = np.linspace(Z_MIN, Z_MAX, nz, dtype=np.float32)
     X, Z = np.meshgrid(x, z, indexing="ij")
 
-    c = np.ones((nx, nz), dtype=np.float32)
+    if model_type == "homogeneous":
+        c = np.ones((nx, nz), dtype=np.float32) * 1.25
+        return x, z, c
 
-    # Layered background medium.
-    c[Z > 0.5] = 1.5
+    if model_type != "heterogeneous":
+        raise ValueError("model_type must be either 'heterogeneous' or 'homogeneous'")
 
-    # Smooth transition near the interface to avoid an unrealistically sharp jump.
+    # Smooth layered background medium.
     transition = 0.5 * (1.0 + np.tanh((Z - 0.5) / 0.025))
     c = (1.0 - transition) * 1.0 + transition * 1.5
 
@@ -94,19 +99,26 @@ def build_absorbing_mask(nx, nz, damping_width=12, damping_strength=0.015):
     return mask
 
 
-def solve_wave_equation_fdm():
+def find_source_indices(x, z):
+    """Return integer grid indices closest to the configured source location."""
+    sx = int(np.argmin(np.abs(x - SOURCE_X)))
+    sz = int(np.argmin(np.abs(z - SOURCE_Z)))
+    return sx, sz
+
+
+def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False):
     """
     Solve the 2D acoustic wave equation with a second-order finite-difference scheme.
 
     The equation is approximated as:
         u_tt = c(x,z)^2 (u_xx + u_zz) + s(x,z,t)
 
-    The resulting wavefield is used as the reference solution for training and
-    evaluating the PINN.
+    The heterogeneous wavefield is used as the reference solution for training and
+    evaluating the PINN. The homogeneous wavefield is used as a baseline.
     """
     nx, nz, nt = NX, NZ, NT
 
-    x, z, c = create_velocity_model(nx, nz)
+    x, z, c = create_velocity_model(nx, nz, model_type=model_type)
     t = np.linspace(T_MIN, T_MAX, nt, dtype=np.float32)
 
     dx = (X_MAX - X_MIN) / (nx - 1)
@@ -123,8 +135,7 @@ def solve_wave_equation_fdm():
 
     u = np.zeros((nt, nx, nz), dtype=np.float32)
 
-    sx = int(np.argmin(np.abs(x - SOURCE_X)))
-    sz = int(np.argmin(np.abs(z - SOURCE_Z)))
+    sx, sz = find_source_indices(x, z)
 
     damping_width = max(8, min(nx, nz) // 8)
     absorbing_mask = build_absorbing_mask(nx, nz, damping_width=damping_width)
@@ -152,5 +163,20 @@ def solve_wave_equation_fdm():
 
         # Absorbing boundary to reduce artificial edge reflections.
         u[n + 1] *= absorbing_mask
+
+    if return_metadata:
+        metadata = {
+            "model_type": model_type,
+            "dx": dx,
+            "dz": dz,
+            "dt": dt,
+            "cfl": cfl,
+            "source_x_index": sx,
+            "source_z_index": sz,
+            "source_x": float(x[sx]),
+            "source_z": float(z[sz]),
+            "max_abs_amplitude": float(np.max(np.abs(u))),
+        }
+        return x, z, t, c, u, metadata
 
     return x, z, t, c, u

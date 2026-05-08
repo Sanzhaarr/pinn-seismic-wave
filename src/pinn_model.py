@@ -23,6 +23,7 @@ class FourierFeatures(nn.Module):
         return torch.cat((torch.sin(projected), torch.cos(projected)), dim=-1)
 
 
+
 class SineActivation(nn.Module):
     """
     Sine activation improves the representation of wave-like solutions compared with
@@ -31,6 +32,29 @@ class SineActivation(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.sin(x)
+
+
+# ResidualBlock for residual MLPs in PINNs
+class ResidualBlock(nn.Module):
+    """
+    Small residual MLP block.
+
+    Residual connections improve optimization stability for deeper PINNs by giving
+    gradients a shorter path through the network. This is useful for wave problems,
+    where the model must represent oscillatory and multi-scale behavior.
+    """
+
+    def __init__(self, hidden_dim: int, activation: str):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            SeismicPINN._build_activation(activation),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.activation = SeismicPINN._build_activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.activation(x + self.layers(x))
 
 
 class SeismicPINN(nn.Module):
@@ -51,6 +75,7 @@ class SeismicPINN(nn.Module):
         depth: int = 8,
         activation: str = "tanh",
         output_scale: float = 1.0,
+        use_residual_blocks: bool = True,
     ):
         super().__init__()
 
@@ -59,6 +84,7 @@ class SeismicPINN(nn.Module):
 
         self.use_fourier = use_fourier
         self.output_scale = output_scale
+        self.use_residual_blocks = use_residual_blocks
 
         if use_fourier:
             self.encoder = FourierFeatures(
@@ -71,17 +97,26 @@ class SeismicPINN(nn.Module):
             self.encoder = nn.Identity()
             input_dim = 3
 
-        activation_layer = self._build_activation(activation)
-
-        layers = [nn.Linear(input_dim, hidden_dim), activation_layer]
-
-        for _ in range(depth - 1):
-            layers.extend([
-                nn.Linear(hidden_dim, hidden_dim),
+        if use_residual_blocks:
+            layers = [
+                nn.Linear(input_dim, hidden_dim),
                 self._build_activation(activation),
-            ])
+            ]
+            for _ in range(depth - 1):
+                layers.append(ResidualBlock(hidden_dim, activation))
+            layers.append(nn.Linear(hidden_dim, 1))
+        else:
+            layers = [
+                nn.Linear(input_dim, hidden_dim),
+                self._build_activation(activation),
+            ]
+            for _ in range(depth - 1):
+                layers.extend([
+                    nn.Linear(hidden_dim, hidden_dim),
+                    self._build_activation(activation),
+                ])
+            layers.append(nn.Linear(hidden_dim, 1))
 
-        layers.append(nn.Linear(hidden_dim, 1))
         self.network = nn.Sequential(*layers)
         self._initialize_weights(activation)
 
@@ -99,13 +134,13 @@ class SeismicPINN(nn.Module):
         raise ValueError("activation must be one of: 'tanh', 'sine', 'gelu'")
 
     def _initialize_weights(self, activation: str) -> None:
-        for layer in self.network:
-            if isinstance(layer, nn.Linear):
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
                 if activation.lower() == "sine":
-                    nn.init.xavier_uniform_(layer.weight)
+                    nn.init.xavier_uniform_(module.weight)
                 else:
-                    nn.init.xavier_uniform_(layer.weight, gain=nn.init.calculate_gain("tanh"))
-                nn.init.zeros_(layer.bias)
+                    nn.init.xavier_uniform_(module.weight, gain=nn.init.calculate_gain("tanh"))
+                nn.init.zeros_(module.bias)
 
     def forward(self, xzt: torch.Tensor) -> torch.Tensor:
         features = self.encoder(xzt)

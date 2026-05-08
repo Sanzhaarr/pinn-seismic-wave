@@ -9,7 +9,7 @@ import torch
 
 from src import config as cfg
 from src.fdm_solver import solve_wave_equation_fdm
-from src.train_pinn import train_pinn, predict_snapshot
+from src.train_pinn import evaluate_pde_residual, predict_snapshot, train_pinn
 from src.metrics import compute_all_metrics, max_abs_value
 from src.plots import plot_velocity_model, plot_wave_snapshot, plot_comparison, plot_loss_curve
 from src.pinn_model import SeismicPINN
@@ -24,6 +24,127 @@ def print_config(mode: str):
     print(f"Training: EPOCHS={cfg.EPOCHS}, N_DATA={cfg.N_DATA}, N_COLLOCATION={cfg.N_COLLOCATION}")
     print(f"Loss weights: PDE={cfg.LAMBDA_PDE}, DATA={cfg.LAMBDA_DATA}, IC={cfg.LAMBDA_IC}, BC={cfg.LAMBDA_BC}")
     print("================================\n")
+
+
+def save_config_snapshot(mode: str):
+    config_rows = [
+        {"parameter": "mode", "value": mode},
+        {"parameter": "config_version", "value": getattr(cfg, "CONFIG_VERSION", "unknown")},
+        {"parameter": "device", "value": str(cfg.DEVICE)},
+        {"parameter": "NX", "value": cfg.NX},
+        {"parameter": "NZ", "value": cfg.NZ},
+        {"parameter": "NT", "value": cfg.NT},
+        {"parameter": "T_MAX", "value": cfg.T_MAX},
+        {"parameter": "SOURCE_FREQUENCY", "value": cfg.SOURCE_FREQUENCY},
+        {"parameter": "SOURCE_AMPLITUDE", "value": cfg.SOURCE_AMPLITUDE},
+        {"parameter": "USE_FOURIER_FEATURES", "value": cfg.USE_FOURIER_FEATURES},
+        {"parameter": "FOURIER_MAPPING_SIZE", "value": cfg.FOURIER_MAPPING_SIZE},
+        {"parameter": "FOURIER_SCALE", "value": cfg.FOURIER_SCALE},
+        {"parameter": "HIDDEN_DIM", "value": cfg.HIDDEN_DIM},
+        {"parameter": "NETWORK_DEPTH", "value": cfg.NETWORK_DEPTH},
+        {"parameter": "ACTIVATION", "value": cfg.ACTIVATION},
+        {"parameter": "EPOCHS", "value": cfg.EPOCHS},
+        {"parameter": "N_DATA", "value": cfg.N_DATA},
+        {"parameter": "N_COLLOCATION", "value": cfg.N_COLLOCATION},
+        {"parameter": "N_INITIAL", "value": cfg.N_INITIAL},
+        {"parameter": "N_BOUNDARY", "value": cfg.N_BOUNDARY},
+        {"parameter": "LAMBDA_PDE", "value": cfg.LAMBDA_PDE},
+        {"parameter": "LAMBDA_DATA", "value": cfg.LAMBDA_DATA},
+        {"parameter": "LAMBDA_IC", "value": cfg.LAMBDA_IC},
+        {"parameter": "LAMBDA_BC", "value": cfg.LAMBDA_BC},
+    ]
+    pd.DataFrame(config_rows).to_csv(f"results/data/config_snapshot_{mode}.csv", index=False)
+
+
+# ==================== Helper functions for baseline and results ====================
+
+def get_snapshot_indices(t):
+    """Choose six representative time indices for figures and metrics."""
+    percentages = [0.15, 0.30, 0.45, 0.60, 0.75, 0.90]
+    return sorted(set([
+        max(0, min(len(t) - 1, int(p * len(t)))) for p in percentages
+    ]))
+
+
+def save_loss_history(loss_history, path):
+    """Persist loss history as CSV for dissertation tables and debugging."""
+    pd.DataFrame(loss_history).to_csv(path, index=False)
+
+
+def plot_baseline_comparison(reference, baseline, time_index, path):
+    """Plot heterogeneous FDM reference against homogeneous FDM baseline."""
+    import matplotlib.pyplot as plt
+
+    ref = reference[time_index]
+    base = baseline[time_index]
+    error = np.abs(ref - base)
+
+    amplitude_limit = np.percentile(
+        np.abs(np.concatenate([ref.reshape(-1), base.reshape(-1)])),
+        99.0,
+    )
+    if not np.isfinite(amplitude_limit) or amplitude_limit <= 0:
+        amplitude_limit = max(max_abs_value(ref), max_abs_value(base), 1.0)
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8), constrained_layout=True)
+
+    im0 = axes[0].imshow(
+        ref.T,
+        origin="lower",
+        extent=[0, 1, 0, 1],
+        aspect="auto",
+        cmap="seismic",
+        vmin=-amplitude_limit,
+        vmax=amplitude_limit,
+    )
+    axes[0].set_title("Heterogeneous FDM Reference")
+    axes[0].set_xlabel("x")
+    axes[0].set_ylabel("z")
+    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
+
+    im1 = axes[1].imshow(
+        base.T,
+        origin="lower",
+        extent=[0, 1, 0, 1],
+        aspect="auto",
+        cmap="seismic",
+        vmin=-amplitude_limit,
+        vmax=amplitude_limit,
+    )
+    axes[1].set_title("Homogeneous FDM Baseline")
+    axes[1].set_xlabel("x")
+    axes[1].set_ylabel("z")
+    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
+
+    im2 = axes[2].imshow(
+        error.T,
+        origin="lower",
+        extent=[0, 1, 0, 1],
+        aspect="auto",
+    )
+    axes[2].set_title("Baseline Absolute Error")
+    axes[2].set_xlabel("x")
+    axes[2].set_ylabel("z")
+    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
+
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_source_wavelet(t, path="results/figures/ricker_wavelet.png"):
+    """Plot the configured Ricker wavelet source."""
+    import matplotlib.pyplot as plt
+    from src.fdm_solver import ricker_wavelet
+
+    plt.figure(figsize=(7, 4.5))
+    plt.plot(t, ricker_wavelet(t))
+    plt.xlabel("Time")
+    plt.ylabel("Source amplitude")
+    plt.title("Ricker Wavelet Source")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close()
 
 
 def load_real_section():
@@ -222,6 +343,7 @@ def run_real_mode():
         path="results/figures/real_section_comparison.png",
     )
     plot_loss_curve(loss_history, path="results/figures/real_loss_curve.png")
+    save_loss_history(loss_history, "results/data/real_loss_history.csv")
 
     real_metrics = compute_all_metrics(pred, section)
     df = pd.DataFrame([
@@ -234,35 +356,47 @@ def run_real_mode():
     ])
 
     df.to_csv("results/data/real_metrics.csv", index=False)
-    df.to_csv("results/data/summary.csv", index=False)
+    df.to_csv("results/data/real_summary.csv", index=False)
 
     print("\nFinal real-data quantitative results:")
     print(df)
 
+    return df
 
 def run_synthetic_mode():
-    print("Step 1: Running finite difference simulation...")
+    print("Step 1: Running heterogeneous finite difference simulation...")
     start_fdm = time.time()
-    result = solve_wave_equation_fdm()
+    result = solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=True)
     fdm_time = time.time() - start_fdm
-
-    if len(result) == 6:
-        x, z, t, c, u_fdm, fdm_scale = result
-    else:
-        x, z, t, c, u_fdm = result
-        fdm_scale = max_abs_value(u_fdm)
+    x, z, t, c, u_fdm, fdm_metadata = result
 
     print(f"FDM simulation completed in {fdm_time:.2f} seconds")
-    print(f"FDM amplitude scale: {fdm_scale:.6e}")
+    print(f"FDM amplitude scale: {fdm_metadata['max_abs_amplitude']:.6e}")
+    print(f"FDM CFL number: {fdm_metadata['cfl']:.6f}")
     print(f"Reference wavefield max amplitude: {max_abs_value(u_fdm):.6e}")
 
-    plot_velocity_model(c)
-    snapshot_indices = sorted(set([
-        max(0, min(len(t) - 1, int(0.25 * len(t)))),
-        max(0, min(len(t) - 1, int(0.45 * len(t)))),
-        max(0, min(len(t) - 1, int(0.65 * len(t)))),
-        max(0, min(len(t) - 1, int(0.85 * len(t)))),
-    ]))
+    print("Step 2: Running homogeneous finite difference baseline...")
+    start_baseline = time.time()
+    baseline_result = solve_wave_equation_fdm(model_type="homogeneous", return_metadata=True)
+    baseline_time = time.time() - start_baseline
+    _, _, _, c_homogeneous, u_homogeneous, baseline_metadata = baseline_result
+
+    print(f"Homogeneous baseline completed in {baseline_time:.2f} seconds")
+    print(f"Homogeneous baseline max amplitude: {baseline_metadata['max_abs_amplitude']:.6e}")
+
+    pd.DataFrame([fdm_metadata, baseline_metadata]).to_csv(
+        "results/data/fdm_metadata.csv",
+        index=False,
+    )
+
+    plot_velocity_model(c, path="results/figures/velocity_model.png")
+    plot_velocity_model(
+        c_homogeneous,
+        path="results/figures/homogeneous_velocity_model.png",
+    )
+    plot_source_wavelet(t)
+
+    snapshot_indices = get_snapshot_indices(t)
 
     for idx in snapshot_indices:
         plot_wave_snapshot(
@@ -271,17 +405,38 @@ def run_synthetic_mode():
             title=f"FDM Wavefield Snapshot at t={t[idx]:.3f}",
             path=f"results/figures/fdm_snapshot_{idx}.png",
         )
+        plot_baseline_comparison(
+            reference=u_fdm,
+            baseline=u_homogeneous,
+            time_index=idx,
+            path=f"results/figures/baseline_comparison_t_{idx}.png",
+        )
 
     print("Step 3: Training synthetic PINN...")
     start_pinn = time.time()
-    model, loss_history = train_pinn(x, z, t, u_fdm)
+    model, loss_history = train_pinn(x, z, t, u_fdm, experiment_name="full")
     pinn_training_time = time.time() - start_pinn
     print(f"PINN training completed in {pinn_training_time:.2f} seconds")
 
+    plot_loss_curve(loss_history, path="results/figures/loss_curve.png")
+    save_loss_history(loss_history, "results/data/loss_history.csv")
+
+    residual_summary = pd.DataFrame([
+        {
+            "mode": "synthetic_full",
+            **evaluate_pde_residual(model),
+        }
+    ])
+    residual_summary.to_csv("results/data/pde_residual_summary.csv", index=False)
+
     metrics_rows = []
+    baseline_rows = []
+
     for idx in snapshot_indices:
         pinn_snapshot = predict_snapshot(model, time_value=t[idx])
         snapshot_metrics = compute_all_metrics(pinn_snapshot, u_fdm[idx])
+        baseline_metrics = compute_all_metrics(u_homogeneous[idx], u_fdm[idx])
+
         metrics_rows.append(
             {
                 "time_index": idx,
@@ -289,6 +444,15 @@ def run_synthetic_mode():
                 **snapshot_metrics,
             }
         )
+
+        baseline_rows.append(
+            {
+                "time_index": idx,
+                "time": float(t[idx]),
+                **baseline_metrics,
+            }
+        )
+
         plot_comparison(
             fdm=u_fdm,
             pinn=pinn_snapshot,
@@ -296,9 +460,11 @@ def run_synthetic_mode():
             path=f"results/figures/comparison_t_{idx}.png",
         )
 
-    plot_loss_curve(loss_history)
     df = pd.DataFrame(metrics_rows)
+    baseline_df = pd.DataFrame(baseline_rows)
+
     df.to_csv("results/data/metrics.csv", index=False)
+    baseline_df.to_csv("results/data/baseline_metrics.csv", index=False)
 
     summary_df = pd.DataFrame([
         {
@@ -310,32 +476,149 @@ def run_synthetic_mode():
             "Mean_NRMSE": df["NRMSE"].mean(),
             "Mean_PSNR_dB": df["PSNR_dB"].mean(),
             "Mean_Correlation": df["Correlation"].mean(),
+            "Baseline_Mean_Relative_L2_Error": baseline_df["Relative_L2_Error"].mean(),
+            "Baseline_Mean_NRMSE": baseline_df["NRMSE"].mean(),
+            "Baseline_Mean_Correlation": baseline_df["Correlation"].mean(),
             "FDM_time_seconds": fdm_time,
+            "Homogeneous_FDM_time_seconds": baseline_time,
             "PINN_training_time_seconds": pinn_training_time,
         }
     ])
-    summary_df.to_csv("results/data/summary.csv", index=False)
+
+    summary_df.to_csv("results/data/synthetic_summary.csv", index=False)
 
     print("\nFinal synthetic quantitative results:")
     print(df)
+
+    print("\nHomogeneous baseline quantitative results:")
+    print(baseline_df)
+
     print("\nSynthetic summary:")
     print(summary_df)
+
+    print("\nPDE residual diagnostics:")
+    print(residual_summary)
+
+    return df, summary_df
+
+
+def write_defense_report(synthetic_summary=None, real_summary=None):
+    lines = [
+        "# Defense Results Summary",
+        "",
+        "Project topic:",
+        "Физически-информированные нейронные сети для моделирования распространения сейсмических волн в неоднородной среде",
+        "",
+        "## Main proof used in the defense",
+        "",
+        "The main proof is the controlled synthetic experiment. In this experiment, the heterogeneous velocity model, seismic source, initial conditions, boundary treatment, and finite-difference reference solution are known. This makes the comparison between FDM and PINN scientifically defensible.",
+        "",
+        "## Secondary real-data demonstration",
+        "",
+        "The real seismic section is included as an applied demonstration. It shows that the neural representation can reconstruct a real seismic section, but it should be described as real-data reconstruction with physics-inspired smoothness regularization unless the exact field velocity model, acquisition geometry, and source wavelet are available.",
+        "",
+        "## Recommended defense wording",
+        "",
+        "The proposed PINN framework was evaluated in a controlled heterogeneous-medium experiment by comparing the neural approximation with a finite-difference reference solution of the acoustic wave equation. The real seismic section was then used as an additional reconstruction experiment to demonstrate practical applicability on field-like data.",
+        "",
+    ]
+
+    if synthetic_summary is not None:
+        lines.extend([
+            "## Synthetic experiment summary",
+            "",
+            synthetic_summary.to_string(index=False),
+            "",
+        ])
+
+    if real_summary is not None:
+        lines.extend([
+            "## Real-data reconstruction summary",
+            "",
+            real_summary.to_string(index=False),
+            "",
+        ])
+
+    lines.extend([
+        "## Files to show during defense",
+        "",
+        "- results/figures/velocity_model.png",
+        "- results/figures/fdm_snapshot_*.png",
+        "- results/figures/baseline_comparison_t_*.png",
+        "- results/figures/ricker_wavelet.png",
+        "- results/figures/comparison_t_*.png",
+        "- results/figures/loss_curve.png",
+        "- results/data/metrics.csv",
+        "- results/data/synthetic_summary.csv",
+        "- results/data/baseline_metrics.csv",
+        "- results/data/pde_residual_summary.csv",
+        "- results/data/fdm_metadata.csv",
+        "- results/data/real_metrics.csv, if real mode was executed",
+        "",
+        "## Important limitation",
+        "",
+        "The real-data experiment alone is not sufficient as proof of physical wave propagation because the true velocity model, source function, and acquisition geometry are not fully constrained. The synthetic FDM-vs-PINN experiment should therefore remain the main scientific validation.",
+    ])
+
+    # Insert extra lines about baseline validation after the main proof paragraph
+    main_proof_str = (
+        "The proposed PINN framework was evaluated in a controlled heterogeneous-medium experiment by comparing the neural approximation with a finite-difference reference solution of the acoustic wave equation. The real seismic section was then used as an additional reconstruction experiment to demonstrate practical applicability on field-like data."
+    )
+    try:
+        idx = lines.index(main_proof_str)
+        lines[idx+1:idx+1] = [
+            "## Added baseline validation",
+            "",
+            "A homogeneous-medium FDM simulation is included as a baseline. This allows the defense to compare the proposed PINN result not only against the heterogeneous reference solution, but also against a simplified physical model that ignores subsurface heterogeneity.",
+            "",
+        ]
+    except ValueError:
+        pass
+    with open("results/data/defense_report.md", "w", encoding="utf-8") as file:
+        file.write("\n".join(lines))
+
+
+def run_all_mode():
+    print("Running full defense pipeline: synthetic experiment + real-data reconstruction if available.")
+    synthetic_metrics, synthetic_summary = run_synthetic_mode()
+
+    real_summary = None
+    try:
+        real_summary = run_real_mode()
+    except Exception as exc:
+        print("\nReal-data mode was skipped because it failed:")
+        print(str(exc))
+        print("Synthetic results are still valid as the main defense proof.")
+
+    summaries = [synthetic_summary]
+    if real_summary is not None:
+        summaries.append(real_summary)
+    pd.concat(summaries, ignore_index=True, sort=False).to_csv("results/data/summary.csv", index=False)
+
+    write_defense_report(synthetic_summary=synthetic_summary, real_summary=real_summary)
+    return synthetic_metrics, synthetic_summary, real_summary
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["synthetic", "real"], default="synthetic")
+    parser.add_argument("--mode", choices=["synthetic", "real", "all"], default="all")
     args = parser.parse_args()
 
     os.makedirs("results/figures", exist_ok=True)
     os.makedirs("results/data", exist_ok=True)
 
     print_config(args.mode)
+    save_config_snapshot(args.mode)
 
     if args.mode == "real":
-        run_real_mode()
+        real_summary = run_real_mode()
+        write_defense_report(real_summary=real_summary)
+    elif args.mode == "synthetic":
+        _, synthetic_summary = run_synthetic_mode()
+        synthetic_summary.to_csv("results/data/summary.csv", index=False)
+        write_defense_report(synthetic_summary=synthetic_summary)
     else:
-        run_synthetic_mode()
+        run_all_mode()
 
     print("\nProject completed.")
     print("Generated figures are saved in: results/figures")

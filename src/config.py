@@ -1,9 +1,26 @@
+import os
+
 import torch
 
 # -----------------------------------------------------------------------------
 # Global reproducibility and device settings
 # -----------------------------------------------------------------------------
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def _select_device():
+    """Pick the fastest available PyTorch device, with an env override for debugging."""
+    forced_device = os.getenv("SEISMIC_DEVICE", "").strip().lower()
+    if forced_device:
+        return torch.device(forced_device)
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+
+    return torch.device("cpu")
+
+
+DEVICE = _select_device()
 RANDOM_SEED = 42
 
 # -----------------------------------------------------------------------------
@@ -21,6 +38,22 @@ NX = 70
 NZ = 70
 NT = 220
 
+# Coarse traditional FDM baseline. This solves the same heterogeneous physics on
+# a cheaper grid, then interpolates back to the reference grid for comparison.
+COARSE_NX = 36
+COARSE_NZ = 36
+COARSE_NT = NT
+
+# Traditional non-neural reconstruction baseline. A sparse subset of the full
+# FDM wavefield is interpolated back to the full grid and compared with the
+# reference. This tests whether the PINN is doing more than simple interpolation.
+SPARSE_BASELINE_TIME_STRIDE = 4
+SPARSE_BASELINE_SPACE_STRIDE = 4
+
+# Robustness scenarios for dissertation experiments. The first scenario keeps
+# backward-compatible filenames; additional scenarios write suffixed artifacts.
+SYNTHETIC_SCENARIOS = ["heterogeneous", "faulted"]
+
 # -----------------------------------------------------------------------------
 # Seismic source settings
 # -----------------------------------------------------------------------------
@@ -28,7 +61,7 @@ SOURCE_X = 0.5
 SOURCE_Z = 0.5
 SOURCE_FREQUENCY = 8.0
 SOURCE_T0 = 0.15
-SOURCE_AMPLITUDE = 5000.0
+SOURCE_AMPLITUDE = 1.0
 
 # -----------------------------------------------------------------------------
 # PINN architecture defaults
@@ -44,7 +77,7 @@ ACTIVATION = "tanh"
 # -----------------------------------------------------------------------------
 # PINN training settings
 # -----------------------------------------------------------------------------
-N_COLLOCATION = 3000
+N_COLLOCATION = 1024
 N_DATA = 32000
 N_INITIAL = 2000
 N_BOUNDARY = 2000
@@ -60,14 +93,28 @@ LBFGS_MAX_ITER = 300
 # -----------------------------------------------------------------------------
 # Loss weights
 # -----------------------------------------------------------------------------
-# Diagnostic run: first verify that the neural model can fit the FDM wavefield.
-# After the data-only model works, reintroduce physics with a very small value,
-# for example LAMBDA_PDE = 1e-6 or 1e-5.
-LAMBDA_PDE = 0.0
+# The PDE residual is numerically large because the network output is
+# normalized and the model uses Fourier features. A very small nonzero weight
+# keeps the experiment genuinely physics-informed without destroying the data fit.
+LAMBDA_PDE = 1e-8
 LAMBDA_DATA = 100.0
 LAMBDA_IC = 0.5
 LAMBDA_BC = 0.5
 LAMBDA_AMPLITUDE = 0.01
+PDE_WARMUP_EPOCHS = 200
+
+# Real sections usually lack a known velocity/source model. Use smoothness as a
+# reconstruction regularizer instead of pretending the full wave PDE is known.
+REAL_SMOOTHNESS_WEIGHT = 1e-3
+
+# Optional ablation runs are intentionally shorter than the main run so they can
+# produce a dissertation table on a laptop without taking all night.
+ABLATION_EPOCHS = 700
+
+# Multi-seed repeats are shorter than the main training run by default. They are
+# meant to quantify robustness, not to replace the best full-length model.
+MULTI_SEED_VALUES = [7, 42, 123]
+MULTI_SEED_EPOCHS = 700
 
 # -----------------------------------------------------------------------------
 # Real seismic data settings
@@ -78,9 +125,13 @@ REAL_SECTION_CSV = "data/real/real_section.csv"
 REAL_SECTION_SGY = "data/real/real_section.sgy"
 REAL_SECTION_SEGY = "data/real/real_section.segy"
 
+# Real-data validation diagnostics use metadata when available and otherwise
+# clearly report that the real section supports reconstruction claims only.
+REAL_VALIDATION_WINDOW = 5
+
 # -----------------------------------------------------------------------------
 # Output paths and experiment versioning
 # -----------------------------------------------------------------------------
 FIGURES_DIR = "results/figures"
 DATA_DIR = "results/data"
-CONFIG_VERSION = "seismic-pinn-defense-v4-stable-data-fit"
+CONFIG_VERSION = "seismic-pinn-defense-v7-robustness-real-validation"

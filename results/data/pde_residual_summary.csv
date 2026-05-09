@@ -1,2 +1,2 @@
 mode,Residual_MAE,Residual_RMSE,Residual_MaxAbs
-data_only_nn,,,
+weak_pde_pinn,142.96478271484375,196.1085205078125,1415.019287109375

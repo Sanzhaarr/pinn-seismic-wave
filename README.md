@@ -80,9 +80,13 @@ Generates the synthetic reference solution using a second-order finite-differenc
 ```text
 heterogeneous velocity model
 Ricker wavelet source
+grid-consistent point-source scaling
 CFL stability check
 absorbing boundary mask
 wavefield simulation
+homogeneous, layered, and coarse-grid FDM baselines
+sparse-grid interpolation baseline
+second faulted heterogeneous validation scenario
 ```
 
 The FDM result is treated as the reference solution for quantitative comparison.
@@ -176,15 +180,46 @@ Run:
 python main.py --mode synthetic
 ```
 
+Run the second heterogeneous scenario:
+
+```bash
+python main.py --mode synthetic --scenario faulted
+```
+
+Run both synthetic scenarios and save combined scenario tables:
+
+```bash
+python main.py --mode synthetic --scenario all
+```
+
+For the dissertation ablation table, run:
+
+```bash
+python main.py --mode synthetic --ablation
+```
+
+For robustness statistics across random initializations, run:
+
+```bash
+python main.py --mode synthetic --multi-seed
+```
+
+For the strongest but slowest synthetic validation:
+
+```bash
+python main.py --mode synthetic --scenario all --ablation --multi-seed
+```
+
 This will:
 
 ```text
 1. create the heterogeneous velocity model
 2. solve the acoustic wave equation using FDM
-3. train the PINN using FDM samples and PDE residuals
-4. generate comparison figures
-5. compute quantitative metrics
-6. save results to the results/ directory
+3. run traditional homogeneous, layered, coarse-grid FDM, and sparse interpolation baselines
+4. train the weak-PDE PINN using FDM samples and PDE residuals
+5. generate comparison figures
+6. compute quantitative metrics
+7. save results to the results/ directory
 ```
 
 Expected outputs:
@@ -193,8 +228,17 @@ Expected outputs:
 results/figures/velocity_model.png
 results/figures/fdm_snapshot_*.png
 results/figures/comparison_t_*.png
+results/figures/coarse_baseline_comparison_t_*.png
+results/figures/sparse_interpolation_comparison_t_*.png
 results/figures/loss_curve.png
 results/data/metrics.csv
+results/data/model_comparison_summary.csv
+results/data/coarse_baseline_metrics.csv
+results/data/sparse_interpolation_baseline_metrics.csv
+results/data/synthetic_scenario_summary.csv        # when --scenario all is used
+results/data/model_comparison_scenario_summary.csv # when --scenario all is used
+results/data/multi_seed_summary.csv                # when --multi-seed is used
+results/data/multi_seed_aggregate.csv              # when --multi-seed is used
 results/data/summary.csv
 results/data/pinn_model.pt
 ```
@@ -224,10 +268,14 @@ It should not be presented as a full physical simulation of the real subsurface.
 Expected outputs:
 
 ```text
-results/figures/real_section.png
-results/figures/real_pinn_reconstruction.png
+results/figures/real_section_reference.png
+results/figures/real_section_comparison.png
 results/figures/real_loss_curve.png
-results/data/summary.csv
+results/figures/real_validation_spectrum.png
+results/data/real_metrics.csv
+results/data/real_physical_validation.csv
+results/data/real_physical_validation_report.md
+results/data/real_summary.csv
 ```
 
 ## 7. Recommended dissertation interpretation
@@ -261,6 +309,11 @@ For stronger final dissertation results, increase gradually:
 NX = 100
 NZ = 100
 NT = 300
+COARSE_NX = 50
+COARSE_NZ = 50
+COARSE_NT = NT
+SPARSE_BASELINE_TIME_STRIDE = 4
+SPARSE_BASELINE_SPACE_STRIDE = 4
 N_COLLOCATION = 10000
 N_DATA = 40000
 EPOCHS = 5000
@@ -275,6 +328,17 @@ Use:
 ```text
 results/data/metrics.csv
 results/data/summary.csv
+results/data/model_comparison_summary.csv
+results/data/homogeneous_baseline_metrics.csv
+results/data/layered_baseline_metrics.csv
+results/data/coarse_baseline_metrics.csv
+results/data/sparse_interpolation_baseline_metrics.csv
+results/data/ablation_summary.csv
+results/data/synthetic_scenario_summary.csv
+results/data/model_comparison_scenario_summary.csv
+results/data/multi_seed_summary.csv
+results/data/multi_seed_aggregate.csv
+results/data/real_physical_validation.csv
 ```
 
 Recommended table columns:
@@ -302,10 +366,10 @@ PSNR dB
 
 ### The FDM solution looks too faint
 
-Because the source term is physically scaled by `dt²`, the amplitude may become small. Increase the source amplitude in `src/config.py`:
+The point source is scaled by the cell area, so `SOURCE_AMPLITUDE` can stay order-one. If a figure is visually too faint, prefer improving plot limits or increasing the source amplitude gradually:
 
 ```python
-SOURCE_AMPLITUDE = 5000.0
+SOURCE_AMPLITUDE = 1.5
 ```
 
 or use automatic normalization only for visualization.
@@ -324,7 +388,7 @@ NETWORK_DEPTH
 
 ### PDE loss is too large
 
-The explicit source term can make the PDE residual large. Reduce:
+The PDE residual can be numerically large because the network uses Fourier features and normalized amplitudes. Keep the weight small:
 
 ```python
 LAMBDA_PDE
@@ -333,8 +397,10 @@ LAMBDA_PDE
 For example:
 
 ```python
-LAMBDA_PDE = 0.01
+LAMBDA_PDE = 1e-8
 ```
+
+The training code avoids the immediate point-source neighborhood when sampling PDE collocation points, because the residual is enforced as the homogeneous wave equation away from the source.
 
 ### PINN prediction is too smooth
 
@@ -370,9 +436,13 @@ Recommended figures:
 1. Heterogeneous velocity model
 2. FDM wavefield snapshots at several times
 3. PINN prediction vs FDM reference vs absolute error
-4. PINN training loss components
-5. Quantitative metrics table
-6. Optional real seismic section reconstruction
+4. Homogeneous/layered/coarse-grid FDM and sparse interpolation baseline comparisons
+5. PINN training loss components
+6. Ablation table showing PDE/Fourier/weight sensitivity
+7. Faulted-scenario robustness comparison
+8. Multi-seed mean/std robustness table
+9. Quantitative metrics and model comparison tables
+10. Optional real seismic section reconstruction and validation-level report
 ```
 
 ## 12. Methodology summary

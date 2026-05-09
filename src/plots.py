@@ -94,8 +94,8 @@ def plot_source_wavelet(t, path="results/figures/ricker_wavelet.png"):
     plt.close()
 
 
-def plot_baseline_comparison(reference, baseline, time_index, path):
-    """Compare heterogeneous FDM reference against homogeneous FDM baseline."""
+def plot_baseline_comparison(reference, baseline, time_index, path, baseline_title="Traditional FDM Baseline"):
+    """Compare heterogeneous FDM reference against a traditional baseline."""
     _ensure_parent_dir(path)
 
     ref = reference[time_index]
@@ -134,7 +134,7 @@ def plot_baseline_comparison(reference, baseline, time_index, path):
         vmin=vmin,
         vmax=vmax,
     )
-    axes[1].set_title("Homogeneous FDM Baseline")
+    axes[1].set_title(baseline_title)
     axes[1].set_xlabel("x")
     axes[1].set_ylabel("z")
     fig.colorbar(image1, ax=axes[1], fraction=0.046, pad=0.04)

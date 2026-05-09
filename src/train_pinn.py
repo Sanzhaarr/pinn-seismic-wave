@@ -9,25 +9,59 @@ from src.config import *
 from src.pinn_model import SeismicPINN
 
 
-def interpolate_velocity(x, z):
+def set_global_seed(seed):
+    """Set numpy and torch seeds for repeatable training comparisons."""
+    seed = int(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def interpolate_velocity(x, z, model_type="heterogeneous"):
     """
     Analytical torch version of the synthetic heterogeneous velocity model.
 
     This must match src.fdm_solver.create_velocity_model as closely as possible,
     because the PDE residual uses this velocity model during PINN training.
     """
+    if model_type == "homogeneous":
+        return torch.ones_like(x) * 1.25
+
     transition = 0.5 * (1.0 + torch.tanh((z - 0.5) / 0.025))
     c = (1.0 - transition) * 1.0 + transition * 1.5
+
+    if model_type == "layered":
+        return c
+
+    if model_type == "faulted":
+        interface = 0.48 + 0.12 * (x - 0.5) + 0.04 * torch.sin(4.0 * torch.pi * x)
+        interface = torch.where(x > 0.55, interface + 0.11, interface - 0.03)
+        transition = 0.5 * (1.0 + torch.tanh((z - interface) / 0.022))
+        c = (1.0 - transition) * 0.95 + transition * 1.55
+
+        channel_center = 0.74 - 0.20 * x
+        channel = (torch.abs(z - channel_center) < 0.045) & (x > 0.12) & (x < 0.88)
+        c = torch.where(channel, torch.tensor(0.82, dtype=x.dtype, device=x.device), c)
+
+        high_velocity_lens = ((x - 0.72) / 0.13) ** 2 + ((z - 0.28) / 0.08) ** 2 < 1.0
+        c = torch.where(high_velocity_lens, torch.tensor(2.1, dtype=x.dtype, device=x.device), c)
+
+        return c
+
+    if model_type != "heterogeneous":
+        raise ValueError(f"Unsupported velocity model_type={model_type!r}")
 
     anomaly = (x - 0.65) ** 2 + (z - 0.35) ** 2 < 0.08 ** 2
     c = torch.where(anomaly, torch.tensor(2.0, dtype=x.dtype, device=x.device), c)
 
+    low_velocity_anomaly = (x - 0.35) ** 2 + (z - 0.70) ** 2 < 0.07 ** 2
+    c = torch.where(low_velocity_anomaly, torch.tensor(0.8, dtype=x.dtype, device=x.device), c)
+
     return c
 
 
-
-
-def pde_residual(model, xzt):
+def pde_residual(model, xzt, velocity_model_type=None):
     """
     Compute the homogeneous acoustic wave-equation residual:
 
@@ -75,9 +109,12 @@ def pde_residual(model, xzt):
 
     x = xzt[:, 0:1]
     z = xzt[:, 1:2]
-    c = interpolate_velocity(x, z)
+    if velocity_model_type is None:
+        velocity_model_type = getattr(model, "velocity_model_type", "heterogeneous")
+    c = interpolate_velocity(x, z, model_type=velocity_model_type)
 
     return u_tt - c ** 2 * (u_xx + u_zz)
+
 
 def get_reference_scale(u_fdm):
     """Return a stable amplitude scale for normalizing the FDM wavefield."""
@@ -91,18 +128,19 @@ def prepare_training_data(x, z, t, u_fdm, reference_scale):
     """
     Sample supervised data points from the FDM solution.
 
-    Half of the points are sampled from high-amplitude regions and half are sampled
-    uniformly. This keeps important wavefronts while still covering quiet regions.
+    The sample mixes high-amplitude wavefront points, uniformly random points, and
+    time-stratified points. The time-stratified part is important because global
+    amplitude sampling can under-train early/late snapshots whose absolute energy
+    is smaller but whose relative error is dissertation-visible.
     """
     flat_abs = np.abs(u_fdm).reshape(-1)
     all_indices = np.arange(flat_abs.size)
 
-    # More high-amplitude samples help the network learn visible wavefronts,
-    # while uniform samples still cover quiet/background regions.
-    n_high = int(0.8 * N_DATA)
-    n_uniform = N_DATA - n_high
+    n_high = int(0.45 * N_DATA)
+    n_time_stratified = int(0.35 * N_DATA)
+    n_uniform = N_DATA - n_high - n_time_stratified
 
-    threshold = np.percentile(flat_abs, 65)
+    threshold = np.percentile(flat_abs, 70)
     high_amplitude_indices = np.where(flat_abs >= threshold)[0]
 
     if len(high_amplitude_indices) == 0:
@@ -110,7 +148,13 @@ def prepare_training_data(x, z, t, u_fdm, reference_scale):
 
     chosen_high = np.random.choice(high_amplitude_indices, size=n_high, replace=True)
     chosen_uniform = np.random.choice(all_indices, size=n_uniform, replace=True)
-    chosen = np.concatenate([chosen_high, chosen_uniform])
+
+    time_indices = np.random.randint(0, len(t), size=n_time_stratified)
+    x_indices = np.random.randint(0, len(x), size=n_time_stratified)
+    z_indices = np.random.randint(0, len(z), size=n_time_stratified)
+    chosen_time = np.ravel_multi_index((time_indices, x_indices, z_indices), u_fdm.shape)
+
+    chosen = np.concatenate([chosen_high, chosen_time, chosen_uniform])
     np.random.shuffle(chosen)
 
     idx_t, idx_x, idx_z = np.unravel_index(chosen, u_fdm.shape)
@@ -124,10 +168,29 @@ def prepare_training_data(x, z, t, u_fdm, reference_scale):
     return data_xzt, data_u
 
 
-def sample_collocation_points():
-    x_c = torch.rand(N_COLLOCATION, 1, device=DEVICE)
-    z_c = torch.rand(N_COLLOCATION, 1, device=DEVICE)
-    t_c = torch.rand(N_COLLOCATION, 1, device=DEVICE) * T_MAX
+def sample_collocation_points(n_points=None, avoid_source=True):
+    n_points = N_COLLOCATION if n_points is None else int(n_points)
+
+    x_c = torch.rand(n_points, 1, device=DEVICE)
+    z_c = torch.rand(n_points, 1, device=DEVICE)
+    t_c = torch.rand(n_points, 1, device=DEVICE) * T_MAX
+
+    if avoid_source:
+        radius2 = 0.035 ** 2
+        for _ in range(4):
+            near_source = (
+                (x_c - SOURCE_X) ** 2
+                + (z_c - SOURCE_Z) ** 2
+                < radius2
+            ) & (torch.abs(t_c - SOURCE_T0) < 0.08)
+            if not torch.any(near_source):
+                break
+
+            count = int(near_source.sum().item())
+            x_c[near_source] = torch.rand(count, device=DEVICE)
+            z_c[near_source] = torch.rand(count, device=DEVICE)
+            t_c[near_source] = torch.rand(count, device=DEVICE) * T_MAX
+
     return torch.cat([x_c, z_c, t_c], dim=1)
 
 
@@ -178,9 +241,11 @@ def train_pinn(
     use_fourier=USE_FOURIER_FEATURES,
     lambda_pde=LAMBDA_PDE,
     epochs=None,
+    seed=None,
+    velocity_model_type="heterogeneous",
 ):
-    torch.manual_seed(RANDOM_SEED)
-    np.random.seed(RANDOM_SEED)
+    active_seed = RANDOM_SEED if seed is None else int(seed)
+    set_global_seed(active_seed)
 
     os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -190,6 +255,9 @@ def train_pinn(
     model = build_model(use_fourier=use_fourier)
     model.reference_scale = reference_scale
     model.experiment_name = experiment_name
+    model.lambda_pde = float(lambda_pde)
+    model.seed = active_seed
+    model.velocity_model_type = velocity_model_type
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -208,6 +276,10 @@ def train_pinn(
     preview_xzt, preview_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
     print(f"Normalized training data range: min={preview_u.min().item():.6e}, max={preview_u.max().item():.6e}")
     print(f"PINN training device: {DEVICE}")
+    if lambda_pde > 0:
+        print(f"PDE residual weight: {lambda_pde:.2e} after warmup")
+    else:
+        print("PDE residual is disabled for optimization; residual diagnostics will still be evaluated after training.")
 
     loss_history = {
         "total": [],
@@ -216,8 +288,13 @@ def train_pinn(
         "ic": [],
         "bc": [],
         "amplitude": [],
+        "pde_weight": [],
         "lr": [],
     }
+
+    pde_warmup_epochs = 0
+    if lambda_pde > 0:
+        pde_warmup_epochs = min(PDE_WARMUP_EPOCHS, max(0, num_epochs // 5))
 
     for epoch in tqdm(range(num_epochs), desc=f"Training PINN [{experiment_name}]"):
         model.train()
@@ -227,9 +304,13 @@ def train_pinn(
         # memorizing one fixed subset and exploding between sampled points.
         data_xzt, data_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
 
-        xzt_c = sample_collocation_points()
-        residual = pde_residual(model, xzt_c)
-        loss_pde = torch.mean(residual ** 2)
+        pde_weight = float(lambda_pde) if epoch >= pde_warmup_epochs else 0.0
+        if pde_weight > 0.0 and N_COLLOCATION > 0:
+            xzt_c = sample_collocation_points()
+            residual = pde_residual(model, xzt_c, velocity_model_type=velocity_model_type)
+            loss_pde = torch.mean(residual ** 2)
+        else:
+            loss_pde = torch.zeros((), dtype=torch.float32, device=DEVICE)
 
         pred_data = model(data_xzt)
         loss_data = torch.mean((pred_data - data_u) ** 2)
@@ -244,7 +325,7 @@ def train_pinn(
         loss_bc = torch.mean(pred_b ** 2)
 
         loss = (
-            lambda_pde * loss_pde
+            pde_weight * loss_pde
             + LAMBDA_DATA * loss_data
             + LAMBDA_IC * loss_ic
             + LAMBDA_BC * loss_bc
@@ -265,6 +346,7 @@ def train_pinn(
         loss_history["ic"].append(float(loss_ic.detach().cpu()))
         loss_history["bc"].append(float(loss_bc.detach().cpu()))
         loss_history["amplitude"].append(float(loss_amp.detach().cpu()))
+        loss_history["pde_weight"].append(pde_weight)
         loss_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
         if epoch % 250 == 0 or epoch == num_epochs - 1:
@@ -276,6 +358,7 @@ def train_pinn(
                 f"IC: {loss_ic.item():.6e} | "
                 f"BC: {loss_bc.item():.6e} | "
                 f"Amp: {loss_amp.item():.6e} | "
+                f"PDE_w: {pde_weight:.1e} | "
                 f"LR: {optimizer.param_groups[0]['lr']:.2e}"
             )
 
@@ -284,17 +367,18 @@ def train_pinn(
     if USE_LBFGS_REFINEMENT:
         _run_lbfgs_refinement(model, data_xzt, data_u, loss_history)
 
-    torch.save(
-        {
-            "state_dict": model.state_dict(),
-            "reference_scale": reference_scale,
-            "experiment_name": experiment_name,
-            "use_fourier": use_fourier,
-            "lambda_pde": lambda_pde,
-            "config_version": CONFIG_VERSION,
-        },
-        f"{DATA_DIR}/pinn_model_{experiment_name}.pt",
-    )
+    checkpoint = {
+        "state_dict": model.state_dict(),
+        "reference_scale": reference_scale,
+        "experiment_name": experiment_name,
+        "use_fourier": use_fourier,
+        "lambda_pde": lambda_pde,
+        "seed": active_seed,
+        "velocity_model_type": velocity_model_type,
+        "config_version": CONFIG_VERSION,
+    }
+    torch.save(checkpoint, f"{DATA_DIR}/pinn_model_{experiment_name}.pt")
+    torch.save(checkpoint, f"{DATA_DIR}/pinn_model.pt")
 
     return model, loss_history
 
@@ -311,9 +395,13 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
     def closure():
         optimizer.zero_grad(set_to_none=True)
 
-        xzt_c = sample_collocation_points()
-        residual = pde_residual(model, xzt_c)
-        loss_pde = torch.mean(residual ** 2)
+        lambda_pde = getattr(model, "lambda_pde", LAMBDA_PDE)
+        if lambda_pde > 0.0 and N_COLLOCATION > 0:
+            xzt_c = sample_collocation_points()
+            residual = pde_residual(model, xzt_c)
+            loss_pde = torch.mean(residual ** 2)
+        else:
+            loss_pde = torch.zeros((), dtype=torch.float32, device=DEVICE)
 
         pred_data = model(data_xzt)
         loss_data = torch.mean((pred_data - data_u) ** 2)
@@ -326,7 +414,7 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
         loss_bc = torch.mean(model(xzt_b) ** 2)
 
         loss = (
-            getattr(model, "lambda_pde", LAMBDA_PDE) * loss_pde
+            lambda_pde * loss_pde
             + LAMBDA_DATA * loss_data
             + LAMBDA_IC * loss_ic
             + LAMBDA_BC * loss_bc
@@ -339,21 +427,27 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
     loss_history["total"].append(float(final_loss.detach().cpu()))
 
 
-def evaluate_pde_residual(model, n_points=5000):
+def evaluate_pde_residual(model, n_points=2048, batch_size=512):
     """Evaluate PDE residual statistics on unseen random collocation points."""
-    if getattr(model, "lambda_pde", LAMBDA_PDE) == 0:
+    model.eval()
+    values = []
+
+    remaining = int(n_points)
+    while remaining > 0:
+        current = min(int(batch_size), remaining)
+        xzt_c = sample_collocation_points(n_points=current)
+        residual = pde_residual(model, xzt_c)
+        values.append(residual.detach().cpu().numpy().reshape(-1))
+        remaining -= current
+
+    values = np.concatenate(values) if values else np.array([], dtype=np.float32)
+    if values.size == 0:
         return {
             "Residual_MAE": np.nan,
             "Residual_RMSE": np.nan,
             "Residual_MaxAbs": np.nan,
         }
 
-    model.eval()
-    xzt_c = sample_collocation_points()
-    if xzt_c.shape[0] > n_points:
-        xzt_c = xzt_c[:n_points]
-    residual = pde_residual(model, xzt_c)
-    values = residual.detach().cpu().numpy().reshape(-1)
     return {
         "Residual_MAE": float(np.mean(np.abs(values))),
         "Residual_RMSE": float(np.sqrt(np.mean(values ** 2))),

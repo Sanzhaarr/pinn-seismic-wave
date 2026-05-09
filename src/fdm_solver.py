@@ -48,6 +48,7 @@ def create_velocity_model(nx=NX, nz=NZ, model_type="heterogeneous"):
         Number of grid points in the x and z directions.
     model_type : str
         "heterogeneous" for the main layered/anomaly model.
+        "faulted" for a second, harder heterogeneous validation model.
         "homogeneous" for a simple constant-velocity baseline.
         "layered" for a traditional layered-only FDM baseline without the anomaly.
 
@@ -62,14 +63,33 @@ def create_velocity_model(nx=NX, nz=NZ, model_type="heterogeneous"):
         c = np.ones((nx, nz), dtype=np.float32) * 1.25
         return x, z, c
 
-    if model_type not in {"heterogeneous", "layered"}:
-        raise ValueError("model_type must be one of: 'heterogeneous', 'homogeneous', 'layered'")
+    if model_type not in {"heterogeneous", "faulted", "layered"}:
+        raise ValueError("model_type must be one of: 'heterogeneous', 'faulted', 'homogeneous', 'layered'")
 
     # Smooth layered background medium.
     transition = 0.5 * (1.0 + np.tanh((Z - 0.5) / 0.025))
     c = (1.0 - transition) * 1.0 + transition * 1.5
 
     if model_type == "layered":
+        return x, z, c.astype(np.float32)
+
+    if model_type == "faulted":
+        # A second heterogeneous scenario for robustness testing. The interface
+        # is laterally shifted by a simple fault, with a low-velocity channel and
+        # a compact high-velocity lens. This differs materially from the primary
+        # circular-anomaly case without requiring a new solver.
+        interface = 0.48 + 0.12 * (X - 0.5) + 0.04 * np.sin(4.0 * np.pi * X)
+        interface = np.where(X > 0.55, interface + 0.11, interface - 0.03)
+        transition = 0.5 * (1.0 + np.tanh((Z - interface) / 0.022))
+        c = (1.0 - transition) * 0.95 + transition * 1.55
+
+        channel_center = 0.74 - 0.20 * X
+        channel = (np.abs(Z - channel_center) < 0.045) & (X > 0.12) & (X < 0.88)
+        c[channel] = 0.82
+
+        high_velocity_lens = ((X - 0.72) / 0.13) ** 2 + ((Z - 0.28) / 0.08) ** 2 < 1.0
+        c[high_velocity_lens] = 2.1
+
         return x, z, c.astype(np.float32)
 
     # Local high-velocity anomaly. This makes the reference medium more complex
@@ -131,7 +151,7 @@ def compute_fdm_stability_metadata(c, dx, dz, dt):
     }
 
 
-def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False):
+def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False, nx=None, nz=None, nt=None):
     """
     Solve the 2D acoustic wave equation with a second-order finite-difference scheme.
 
@@ -142,7 +162,9 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False):
     and evaluating the neural model. Homogeneous and layered wavefields are used as
     traditional FDM baselines.
     """
-    nx, nz, nt = NX, NZ, NT
+    nx = NX if nx is None else int(nx)
+    nz = NZ if nz is None else int(nz)
+    nt = NT if nt is None else int(nt)
 
     x, z, c = create_velocity_model(nx, nz, model_type=model_type)
     t = np.linspace(T_MIN, T_MAX, nt, dtype=np.float32)
@@ -183,9 +205,9 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False):
             + dt2 * c2[1:-1, 1:-1] * laplacian
         )
 
-        # Point-source forcing. The dt^2 factor keeps the source consistent with
-        # the second-order time discretization of u_tt.
-        u[n + 1, sx, sz] += dt2 * ricker_wavelet(t[n])
+        # Point-source forcing. Dividing by the cell area makes the discrete
+        # delta source comparable across grid resolutions.
+        u[n + 1, sx, sz] += dt2 * ricker_wavelet(t[n]) / (dx * dz)
 
         # Absorbing boundary to reduce artificial edge reflections.
         u[n + 1] *= absorbing_mask
@@ -193,6 +215,9 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False):
     if return_metadata:
         metadata = {
             "model_type": model_type,
+            "nx": nx,
+            "nz": nz,
+            "nt": nt,
             "dx": dx,
             "dz": dz,
             "dt": dt,
@@ -210,6 +235,7 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False):
             "damping_max": float(np.max(absorbing_mask)),
             "source_frequency": SOURCE_FREQUENCY,
             "source_amplitude": SOURCE_AMPLITUDE,
+            "source_discretization": "point_delta_scaled_by_cell_area",
         }
         return x, z, t, c, u, metadata
 

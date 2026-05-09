@@ -168,7 +168,31 @@ def prepare_training_data(x, z, t, u_fdm, reference_scale):
     return data_xzt, data_u
 
 
-def sample_collocation_points(n_points=None, avoid_source=True):
+def _normalize_source_locations(source_locations=None):
+    if source_locations is None:
+        return [(SOURCE_X, SOURCE_Z, SOURCE_T0)]
+
+    normalized = []
+    for source in source_locations:
+        if isinstance(source, dict):
+            normalized.append(
+                (
+                    float(source.get("x", SOURCE_X)),
+                    float(source.get("z", SOURCE_Z)),
+                    float(source.get("t0", SOURCE_T0)),
+                )
+            )
+        else:
+            if len(source) == 2:
+                sx, sz = source
+                st0 = SOURCE_T0
+            else:
+                sx, sz, st0 = source[:3]
+            normalized.append((float(sx), float(sz), float(st0)))
+    return normalized
+
+
+def sample_collocation_points(n_points=None, avoid_source=True, source_locations=None):
     n_points = N_COLLOCATION if n_points is None else int(n_points)
 
     x_c = torch.rand(n_points, 1, device=DEVICE)
@@ -178,11 +202,12 @@ def sample_collocation_points(n_points=None, avoid_source=True):
     if avoid_source:
         radius2 = 0.035 ** 2
         for _ in range(4):
-            near_source = (
-                (x_c - SOURCE_X) ** 2
-                + (z_c - SOURCE_Z) ** 2
-                < radius2
-            ) & (torch.abs(t_c - SOURCE_T0) < 0.08)
+            near_source = torch.zeros_like(x_c, dtype=torch.bool)
+            for sx, sz, st0 in _normalize_source_locations(source_locations):
+                near_source = near_source | (
+                    ((x_c - sx) ** 2 + (z_c - sz) ** 2 < radius2)
+                    & (torch.abs(t_c - st0) < 0.08)
+                )
             if not torch.any(near_source):
                 break
 
@@ -243,6 +268,7 @@ def train_pinn(
     epochs=None,
     seed=None,
     velocity_model_type="heterogeneous",
+    source_locations=None,
 ):
     active_seed = RANDOM_SEED if seed is None else int(seed)
     set_global_seed(active_seed)
@@ -258,6 +284,7 @@ def train_pinn(
     model.lambda_pde = float(lambda_pde)
     model.seed = active_seed
     model.velocity_model_type = velocity_model_type
+    model.source_locations = _normalize_source_locations(source_locations)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -306,7 +333,7 @@ def train_pinn(
 
         pde_weight = float(lambda_pde) if epoch >= pde_warmup_epochs else 0.0
         if pde_weight > 0.0 and N_COLLOCATION > 0:
-            xzt_c = sample_collocation_points()
+            xzt_c = sample_collocation_points(source_locations=model.source_locations)
             residual = pde_residual(model, xzt_c, velocity_model_type=velocity_model_type)
             loss_pde = torch.mean(residual ** 2)
         else:
@@ -375,6 +402,7 @@ def train_pinn(
         "lambda_pde": lambda_pde,
         "seed": active_seed,
         "velocity_model_type": velocity_model_type,
+        "source_locations": model.source_locations,
         "config_version": CONFIG_VERSION,
     }
     torch.save(checkpoint, f"{DATA_DIR}/pinn_model_{experiment_name}.pt")
@@ -397,7 +425,7 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
 
         lambda_pde = getattr(model, "lambda_pde", LAMBDA_PDE)
         if lambda_pde > 0.0 and N_COLLOCATION > 0:
-            xzt_c = sample_collocation_points()
+            xzt_c = sample_collocation_points(source_locations=getattr(model, "source_locations", None))
             residual = pde_residual(model, xzt_c)
             loss_pde = torch.mean(residual ** 2)
         else:
@@ -435,7 +463,10 @@ def evaluate_pde_residual(model, n_points=2048, batch_size=512):
     remaining = int(n_points)
     while remaining > 0:
         current = min(int(batch_size), remaining)
-        xzt_c = sample_collocation_points(n_points=current)
+        xzt_c = sample_collocation_points(
+            n_points=current,
+            source_locations=getattr(model, "source_locations", None),
+        )
         residual = pde_residual(model, xzt_c)
         values.append(residual.detach().cpu().numpy().reshape(-1))
         remaining -= current

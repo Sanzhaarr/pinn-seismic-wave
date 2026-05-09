@@ -87,6 +87,7 @@ wavefield simulation
 homogeneous, layered, and coarse-grid FDM baselines
 sparse-grid interpolation baseline
 second faulted heterogeneous validation scenario
+optional multiple-source wavefield case
 ```
 
 The FDM result is treated as the reference solution for quantitative comparison.
@@ -204,10 +205,16 @@ For robustness statistics across random initializations, run:
 python main.py --mode synthetic --multi-seed
 ```
 
+For the optional multiple-source case, run:
+
+```bash
+python main.py --mode synthetic --source-case multi_source
+```
+
 For the strongest but slowest synthetic validation:
 
 ```bash
-python main.py --mode synthetic --scenario all --ablation --multi-seed
+python main.py --mode synthetic --scenario all --source-case multi_source --ablation --multi-seed
 ```
 
 This will:
@@ -239,6 +246,9 @@ results/data/synthetic_scenario_summary.csv        # when --scenario all is used
 results/data/model_comparison_scenario_summary.csv # when --scenario all is used
 results/data/multi_seed_summary.csv                # when --multi-seed is used
 results/data/multi_seed_aggregate.csv              # when --multi-seed is used
+results/data/velocity_inversion_diagnostic.csv
+results/data/advanced_scope_matrix.csv
+results/data/advanced_scope_report.md
 results/data/summary.csv
 results/data/pinn_model.pt
 ```
@@ -339,6 +349,8 @@ results/data/model_comparison_scenario_summary.csv
 results/data/multi_seed_summary.csv
 results/data/multi_seed_aggregate.csv
 results/data/real_physical_validation.csv
+results/data/velocity_inversion_diagnostic.csv
+results/data/advanced_scope_matrix.csv
 ```
 
 Recommended table columns:
@@ -362,7 +374,25 @@ Correlation
 PSNR dB
 ```
 
-## 10. Common issues
+## 10. Advanced cases and thesis scope
+
+The project intentionally implements only the advanced cases that strengthen the current dissertation without changing it into a different project:
+
+```text
+Implemented now:
+- multiple seismic sources
+- apparent-velocity diagnostic for inversion discussion
+
+Future work:
+- 3D wave propagation
+- elastic P-wave/S-wave equations
+- anisotropic media
+- full unknown-velocity inversion
+```
+
+The future-work items are valuable, but each requires a different physical model, validation strategy, and computational budget. For the defense, keep the main claim on 2D acoustic heterogeneous wave propagation and use the advanced report as evidence that the scope was considered carefully.
+
+## 11. Common issues
 
 ### The FDM solution looks too faint
 
@@ -428,7 +458,7 @@ NX = 60
 NZ = 60
 ```
 
-## 11. Suggested dissertation figures
+## 12. Suggested dissertation figures
 
 Recommended figures:
 
@@ -441,11 +471,13 @@ Recommended figures:
 6. Ablation table showing PDE/Fourier/weight sensitivity
 7. Faulted-scenario robustness comparison
 8. Multi-seed mean/std robustness table
-9. Quantitative metrics and model comparison tables
-10. Optional real seismic section reconstruction and validation-level report
+9. Multiple-source wavefield comparison
+10. Apparent-velocity diagnostic table
+11. Quantitative metrics and model comparison tables
+12. Optional real seismic section reconstruction and validation-level report
 ```
 
-## 12. Methodology summary
+## 13. Methodology summary
 
 The methodology consists of four stages:
 

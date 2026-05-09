@@ -8,9 +8,11 @@ import pandas as pd
 import torch
 
 from src import config as cfg
-from src.fdm_solver import solve_wave_equation_fdm
+from src.advanced_cases import apparent_velocity_diagnostic, write_advanced_scope_report
+from src.fdm_solver import normalize_sources, solve_wave_equation_fdm
 from src.train_pinn import evaluate_pde_residual, predict_snapshot, train_pinn
 from src.metrics import compute_all_metrics, max_abs_value
+from src.thesis_assets import write_thesis_assets
 from src.plots import (
     plot_baseline_comparison,
     plot_comparison,
@@ -22,13 +24,14 @@ from src.plots import (
 from src.pinn_model import SeismicPINN
 
 
-def print_config(mode: str, scenario="heterogeneous", run_multi_seed=False):
+def print_config(mode: str, scenario="heterogeneous", source_case="single", run_multi_seed=False):
     print("\n===== PROJECT CONFIG CHECK =====")
     print(f"Mode: {mode}")
     print(f"Running config from: {cfg.__file__}")
     print(f"Config version: {getattr(cfg, 'CONFIG_VERSION', 'NO_CONFIG_VERSION_FOUND')}")
     print(f"Device: {cfg.DEVICE}")
     print(f"Synthetic scenario request: {scenario}")
+    print(f"Source case: {source_case}")
     print(f"Grid: NX={cfg.NX}, NZ={cfg.NZ}, NT={cfg.NT}")
     print(f"Coarse FDM baseline grid: NX={cfg.COARSE_NX}, NZ={cfg.COARSE_NZ}, NT={cfg.COARSE_NT}")
     print(f"Training: EPOCHS={cfg.EPOCHS}, N_DATA={cfg.N_DATA}, N_COLLOCATION={cfg.N_COLLOCATION}")
@@ -41,10 +44,11 @@ def print_config(mode: str, scenario="heterogeneous", run_multi_seed=False):
     print("================================\n")
 
 
-def save_config_snapshot(mode: str, scenario="heterogeneous", run_multi_seed=False):
+def save_config_snapshot(mode: str, scenario="heterogeneous", source_case="single", run_multi_seed=False):
     config_rows = [
         {"parameter": "mode", "value": mode},
         {"parameter": "scenario_request", "value": scenario},
+        {"parameter": "source_case", "value": source_case},
         {"parameter": "multi_seed_requested", "value": run_multi_seed},
         {"parameter": "config_version", "value": getattr(cfg, "CONFIG_VERSION", "unknown")},
         {"parameter": "device", "value": str(cfg.DEVICE)},
@@ -57,6 +61,7 @@ def save_config_snapshot(mode: str, scenario="heterogeneous", run_multi_seed=Fal
         {"parameter": "SPARSE_BASELINE_TIME_STRIDE", "value": cfg.SPARSE_BASELINE_TIME_STRIDE},
         {"parameter": "SPARSE_BASELINE_SPACE_STRIDE", "value": cfg.SPARSE_BASELINE_SPACE_STRIDE},
         {"parameter": "SYNTHETIC_SCENARIOS", "value": ",".join(cfg.SYNTHETIC_SCENARIOS)},
+        {"parameter": "MULTI_SOURCE_COUNT", "value": len(cfg.MULTI_SOURCE_DEFINITIONS)},
         {"parameter": "T_MAX", "value": cfg.T_MAX},
         {"parameter": "SOURCE_FREQUENCY", "value": cfg.SOURCE_FREQUENCY},
         {"parameter": "SOURCE_AMPLITUDE", "value": cfg.SOURCE_AMPLITUDE},
@@ -167,6 +172,14 @@ def scenario_suffix(scenario):
     return "" if scenario == "heterogeneous" else f"_{scenario}"
 
 
+def source_case_suffix(source_case):
+    return "" if source_case == "single" else f"_{source_case}"
+
+
+def artifact_key(scenario, source_case="single"):
+    return f"{scenario}{source_case_suffix(source_case)}"
+
+
 def scenario_label(scenario):
     labels = {
         "heterogeneous": "Layered anomalies",
@@ -201,6 +214,19 @@ def resolve_scenarios(scenario_arg):
             f"Unknown scenario={scenario_arg!r}. Valid values: {cfg.SYNTHETIC_SCENARIOS + ['all']}"
         )
     return [scenario_arg]
+
+
+def resolve_source_case(source_case):
+    if source_case not in {"single", "multi_source"}:
+        raise ValueError("source_case must be one of: 'single', 'multi_source'")
+    return source_case
+
+
+def get_sources_for_case(source_case):
+    source_case = resolve_source_case(source_case)
+    if source_case == "multi_source":
+        return normalize_sources(cfg.MULTI_SOURCE_DEFINITIONS)
+    return normalize_sources(None)
 
 
 def resample_wavefield_to_grid(u, source_t, source_x, source_z, target_t, target_x, target_z):
@@ -733,13 +759,29 @@ def run_real_mode():
     return df
 
 
-def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_seed=False):
-    print(f"Step 1: Running finite difference simulation for scenario: {scenario}")
+def run_synthetic_mode(
+    run_ablation=False,
+    scenario="heterogeneous",
+    source_case="single",
+    run_multi_seed=False,
+):
+    source_case = resolve_source_case(source_case)
+    active_sources = get_sources_for_case(source_case)
+    output_key = artifact_key(scenario, source_case)
+
+    print(f"Step 1: Running finite difference simulation for scenario: {scenario}, source_case: {source_case}")
     start_fdm = time.time()
-    result = solve_wave_equation_fdm(model_type=scenario, return_metadata=True)
+    result = solve_wave_equation_fdm(model_type=scenario, sources=active_sources, return_metadata=True)
     fdm_time = time.time() - start_fdm
     x, z, t, c, u_fdm, fdm_metadata = result
     fdm_metadata["scenario"] = scenario
+    fdm_metadata["source_case"] = source_case
+
+    write_advanced_scope_report()
+    velocity_diagnostic = apparent_velocity_diagnostic(x, z, t, u_fdm, sources=active_sources)
+    velocity_diagnostic["scenario"] = scenario
+    velocity_diagnostic["source_case"] = source_case
+    velocity_diagnostic.to_csv(data_path("velocity_inversion_diagnostic.csv", scenario=output_key), index=False)
 
     print(f"FDM simulation completed in {fdm_time:.2f} seconds")
     print(f"FDM amplitude scale: {fdm_metadata['max_abs_amplitude']:.6e}")
@@ -748,7 +790,7 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
 
     print("Step 2: Running traditional finite difference baselines...")
     start_baseline = time.time()
-    baseline_result = solve_wave_equation_fdm(model_type="homogeneous", return_metadata=True)
+    baseline_result = solve_wave_equation_fdm(model_type="homogeneous", sources=active_sources, return_metadata=True)
     baseline_time = time.time() - start_baseline
     _, _, _, c_homogeneous, u_homogeneous, baseline_metadata = baseline_result
 
@@ -756,7 +798,7 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
     print(f"Homogeneous baseline max amplitude: {baseline_metadata['max_abs_amplitude']:.6e}")
 
     start_layered = time.time()
-    layered_result = solve_wave_equation_fdm(model_type="layered", return_metadata=True)
+    layered_result = solve_wave_equation_fdm(model_type="layered", sources=active_sources, return_metadata=True)
     layered_time = time.time() - start_layered
     _, _, _, c_layered, u_layered, layered_metadata = layered_result
 
@@ -769,6 +811,7 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
         nx=cfg.COARSE_NX,
         nz=cfg.COARSE_NZ,
         nt=cfg.COARSE_NT,
+        sources=active_sources,
         return_metadata=True,
     )
     coarse_solve_time = time.time() - start_coarse
@@ -807,6 +850,10 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
     sparse_metadata["scenario"] = scenario
     baseline_metadata["scenario"] = scenario
     layered_metadata["scenario"] = scenario
+    sparse_metadata["source_case"] = source_case
+    baseline_metadata["source_case"] = source_case
+    layered_metadata["source_case"] = source_case
+    coarse_metadata["source_case"] = source_case
 
     print(f"Sparse trilinear interpolation baseline completed in {sparse_time:.2f} seconds")
     print(
@@ -820,23 +867,23 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
         layered_metadata,
         coarse_metadata,
         sparse_metadata,
-    ]).to_csv(data_path("fdm_metadata.csv", scenario=scenario), index=False)
+    ]).to_csv(data_path("fdm_metadata.csv", scenario=output_key), index=False)
 
     plot_velocity_model(
         c,
-        path=figure_path("velocity_model.png", scenario=scenario),
+        path=figure_path("velocity_model.png", scenario=output_key),
         title=f"{scenario_label(scenario)} Velocity Model",
     )
     plot_velocity_model(
         c_homogeneous,
-        path=figure_path("homogeneous_velocity_model.png", scenario=scenario),
+        path=figure_path("homogeneous_velocity_model.png", scenario=output_key),
     )
     plot_velocity_model(
         c_layered,
-        path=figure_path("layered_velocity_model.png", scenario=scenario),
+        path=figure_path("layered_velocity_model.png", scenario=output_key),
         title="Layered Baseline Velocity Model",
     )
-    plot_source_wavelet(t, path=figure_path("ricker_wavelet.png", scenario=scenario))
+    plot_source_wavelet(t, path=figure_path("ricker_wavelet.png", scenario=output_key), sources=active_sources)
 
     snapshot_indices = get_snapshot_indices(t)
 
@@ -845,39 +892,39 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
             u_fdm,
             idx,
             title=f"FDM Wavefield Snapshot at t={t[idx]:.3f}",
-            path=figure_path(f"fdm_snapshot_{idx}.png", scenario=scenario),
+            path=figure_path(f"fdm_snapshot_{idx}.png", scenario=output_key),
         )
         plot_baseline_comparison(
             reference=u_fdm,
             baseline=u_homogeneous,
             time_index=idx,
-            path=figure_path(f"baseline_comparison_t_{idx}.png", scenario=scenario),
+            path=figure_path(f"baseline_comparison_t_{idx}.png", scenario=output_key),
             baseline_title="Homogeneous FDM Baseline",
         )
         plot_baseline_comparison(
             reference=u_fdm,
             baseline=u_layered,
             time_index=idx,
-            path=figure_path(f"layered_baseline_comparison_t_{idx}.png", scenario=scenario),
+            path=figure_path(f"layered_baseline_comparison_t_{idx}.png", scenario=output_key),
             baseline_title="Layered FDM Baseline",
         )
         plot_baseline_comparison(
             reference=u_fdm,
             baseline=u_coarse_resampled,
             time_index=idx,
-            path=figure_path(f"coarse_baseline_comparison_t_{idx}.png", scenario=scenario),
+            path=figure_path(f"coarse_baseline_comparison_t_{idx}.png", scenario=output_key),
             baseline_title="Coarse Heterogeneous FDM Baseline",
         )
         plot_baseline_comparison(
             reference=u_fdm,
             baseline=u_sparse_interpolated,
             time_index=idx,
-            path=figure_path(f"sparse_interpolation_comparison_t_{idx}.png", scenario=scenario),
+            path=figure_path(f"sparse_interpolation_comparison_t_{idx}.png", scenario=output_key),
             baseline_title="Sparse Trilinear Interpolation Baseline",
         )
 
     base_neural_model_name = "data_only_nn" if cfg.LAMBDA_PDE == 0 else "weak_pde_pinn"
-    neural_model_name = f"{base_neural_model_name}{scenario_suffix(scenario)}"
+    neural_model_name = f"{base_neural_model_name}{scenario_suffix(output_key)}"
     neural_display_name = "Data-only NN" if cfg.LAMBDA_PDE == 0 else "Weak-PDE PINN"
 
     print(f"Step 3: Training synthetic neural model ({neural_display_name})...")
@@ -890,21 +937,23 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
         experiment_name=neural_model_name,
         lambda_pde=cfg.LAMBDA_PDE,
         velocity_model_type=scenario,
+        source_locations=active_sources,
     )
     pinn_training_time = time.time() - start_pinn
     print(f"Neural model training completed in {pinn_training_time:.2f} seconds")
 
-    plot_loss_curve(loss_history, path=figure_path("loss_curve.png", scenario=scenario))
-    save_loss_history(loss_history, data_path("loss_history.csv", scenario=scenario))
+    plot_loss_curve(loss_history, path=figure_path("loss_curve.png", scenario=output_key))
+    save_loss_history(loss_history, data_path("loss_history.csv", scenario=output_key))
 
     residual_summary = pd.DataFrame([
         {
             "mode": neural_model_name,
             "scenario": scenario,
+            "source_case": source_case,
             **evaluate_pde_residual(model),
         }
     ])
-    residual_summary.to_csv(data_path("pde_residual_summary.csv", scenario=scenario), index=False)
+    residual_summary.to_csv(data_path("pde_residual_summary.csv", scenario=output_key), index=False)
 
     metrics_rows = []
     homogeneous_baseline_rows = []
@@ -964,7 +1013,7 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
             fdm=u_fdm,
             pinn=pinn_snapshot,
             time_index=idx,
-            path=figure_path(f"comparison_t_{idx}.png", scenario=scenario),
+            path=figure_path(f"comparison_t_{idx}.png", scenario=output_key),
         )
 
     df = pd.DataFrame(metrics_rows)
@@ -973,14 +1022,14 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
     coarse_baseline_df = pd.DataFrame(coarse_baseline_rows)
     sparse_baseline_df = pd.DataFrame(sparse_baseline_rows)
 
-    df.to_csv(data_path("metrics.csv", scenario=scenario), index=False)
-    homogeneous_baseline_df.to_csv(data_path("homogeneous_baseline_metrics.csv", scenario=scenario), index=False)
-    layered_baseline_df.to_csv(data_path("layered_baseline_metrics.csv", scenario=scenario), index=False)
-    coarse_baseline_df.to_csv(data_path("coarse_baseline_metrics.csv", scenario=scenario), index=False)
-    sparse_baseline_df.to_csv(data_path("sparse_interpolation_baseline_metrics.csv", scenario=scenario), index=False)
+    df.to_csv(data_path("metrics.csv", scenario=output_key), index=False)
+    homogeneous_baseline_df.to_csv(data_path("homogeneous_baseline_metrics.csv", scenario=output_key), index=False)
+    layered_baseline_df.to_csv(data_path("layered_baseline_metrics.csv", scenario=output_key), index=False)
+    coarse_baseline_df.to_csv(data_path("coarse_baseline_metrics.csv", scenario=output_key), index=False)
+    sparse_baseline_df.to_csv(data_path("sparse_interpolation_baseline_metrics.csv", scenario=output_key), index=False)
 
     # Backward-compatible filename used by earlier report versions.
-    homogeneous_baseline_df.to_csv(data_path("baseline_metrics.csv", scenario=scenario), index=False)
+    homogeneous_baseline_df.to_csv(data_path("baseline_metrics.csv", scenario=output_key), index=False)
 
     neural_comparison_row = summarize_metric_table(
         df,
@@ -1020,27 +1069,47 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
 
     for row in comparison_rows:
         row["scenario"] = scenario
+        row["source_case"] = source_case
 
     ablation_summary = None
     if run_ablation:
-        ablation_summary = run_ablation_study(x, z, t, u_fdm, snapshot_indices, scenario=scenario)
+        ablation_summary = run_ablation_study(
+            x,
+            z,
+            t,
+            u_fdm,
+            snapshot_indices,
+            scenario=scenario,
+            source_case=source_case,
+            source_locations=active_sources,
+        )
         if ablation_summary is not None and not ablation_summary.empty:
             comparison_rows.extend(ablation_summary.to_dict("records"))
 
     multi_seed_summary = None
     if run_multi_seed:
-        multi_seed_summary = run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario=scenario)
+        multi_seed_summary = run_multi_seed_repeats(
+            x,
+            z,
+            t,
+            u_fdm,
+            snapshot_indices,
+            scenario=scenario,
+            source_case=source_case,
+            source_locations=active_sources,
+        )
         if multi_seed_summary is not None and not multi_seed_summary.empty:
             comparison_rows.extend(multi_seed_summary.to_dict("records"))
 
     comparison_df = pd.DataFrame(comparison_rows)
-    comparison_df.to_csv(data_path("model_comparison_summary.csv", scenario=scenario), index=False)
-    save_model_comparison_figures(comparison_df, scenario=scenario)
+    comparison_df.to_csv(data_path("model_comparison_summary.csv", scenario=output_key), index=False)
+    save_model_comparison_figures(comparison_df, scenario=output_key)
 
     summary_df = pd.DataFrame([
         {
             "mode": "synthetic",
             "scenario": scenario,
+            "source_case": source_case,
             "num_snapshots": len(snapshot_indices),
             "Mean_MSE": df["MSE"].mean(),
             "Mean_MAE": df["MAE"].mean(),
@@ -1066,13 +1135,18 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
             "Layered_FDM_time_seconds": layered_time,
             "Coarse_FDM_time_seconds": coarse_total_time,
             "SparseInterp_time_seconds": sparse_time,
+            "VelocityDiagnostic_apparent_velocity": (
+                velocity_diagnostic["apparent_velocity"].dropna().mean()
+                if "apparent_velocity" in velocity_diagnostic.columns
+                else np.nan
+            ),
             "Neural_model_name": neural_model_name,
             "Neural_display_name": neural_display_name,
             "PINN_training_time_seconds": pinn_training_time,
         }
     ])
 
-    summary_df.to_csv(data_path("synthetic_summary.csv", scenario=scenario), index=False)
+    summary_df.to_csv(data_path("synthetic_summary.csv", scenario=output_key), index=False)
 
     print("\nFinal synthetic quantitative results:")
     print(df)
@@ -1101,9 +1175,19 @@ def run_synthetic_mode(run_ablation=False, scenario="heterogeneous", run_multi_s
     return df, summary_df
 
 
-def run_ablation_study(x, z, t, u_fdm, snapshot_indices, scenario="heterogeneous"):
+def run_ablation_study(
+    x,
+    z,
+    t,
+    u_fdm,
+    snapshot_indices,
+    scenario="heterogeneous",
+    source_case="single",
+    source_locations=None,
+):
     """Run optional smaller ablation experiments for dissertation comparison tables."""
-    print(f"\nRunning optional ablation study for scenario: {scenario}")
+    output_key = artifact_key(scenario, source_case)
+    print(f"\nRunning optional ablation study for scenario: {scenario}, source_case: {source_case}")
     ablation_epochs = int(getattr(cfg, "ABLATION_EPOCHS", max(500, cfg.EPOCHS // 2)))
     experiments = [
         {
@@ -1142,7 +1226,7 @@ def run_ablation_study(x, z, t, u_fdm, snapshot_indices, scenario="heterogeneous
 
     rows = []
     for exp in experiments:
-        experiment_name = f"{exp['experiment']}{scenario_suffix(scenario)}"
+        experiment_name = f"{exp['experiment']}{scenario_suffix(output_key)}"
         print(f"\nAblation experiment: {experiment_name}")
         start = time.time()
         model, loss_history = train_pinn(
@@ -1155,9 +1239,10 @@ def run_ablation_study(x, z, t, u_fdm, snapshot_indices, scenario="heterogeneous
             lambda_pde=exp["lambda_pde"],
             epochs=ablation_epochs,
             velocity_model_type=scenario,
+            source_locations=source_locations,
         )
         training_time = time.time() - start
-        save_loss_history(loss_history, data_path(f"loss_history_{exp['experiment']}.csv", scenario=scenario))
+        save_loss_history(loss_history, data_path(f"loss_history_{exp['experiment']}.csv", scenario=output_key))
 
         metric_rows = []
         for idx in snapshot_indices:
@@ -1173,6 +1258,7 @@ def run_ablation_study(x, z, t, u_fdm, snapshot_indices, scenario="heterogeneous
         )
         row["experiment"] = exp["experiment"]
         row["scenario"] = scenario
+        row["source_case"] = source_case
         row["factor_tested"] = exp["factor_tested"]
         row["ablation_epochs"] = ablation_epochs
         row["lambda_pde"] = exp["lambda_pde"]
@@ -1181,19 +1267,32 @@ def run_ablation_study(x, z, t, u_fdm, snapshot_indices, scenario="heterogeneous
         rows.append(row)
 
     ablation_df = pd.DataFrame(rows)
-    ablation_df.to_csv(data_path("ablation_summary.csv", scenario=scenario), index=False)
+    ablation_df.to_csv(data_path("ablation_summary.csv", scenario=output_key), index=False)
     return ablation_df
 
 
-def run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario="heterogeneous"):
+def run_multi_seed_repeats(
+    x,
+    z,
+    t,
+    u_fdm,
+    snapshot_indices,
+    scenario="heterogeneous",
+    source_case="single",
+    source_locations=None,
+):
     """Run shorter repeated trainings to quantify seed sensitivity."""
+    output_key = artifact_key(scenario, source_case)
     seeds = [int(seed) for seed in getattr(cfg, "MULTI_SEED_VALUES", [cfg.RANDOM_SEED])]
     repeat_epochs = int(getattr(cfg, "MULTI_SEED_EPOCHS", max(500, cfg.EPOCHS // 2)))
 
-    print(f"\nRunning multi-seed repeats for scenario={scenario}: seeds={seeds}, epochs={repeat_epochs}")
+    print(
+        f"\nRunning multi-seed repeats for scenario={scenario}, "
+        f"source_case={source_case}: seeds={seeds}, epochs={repeat_epochs}"
+    )
     rows = []
     for seed in seeds:
-        experiment_name = f"multi_seed_{seed}{scenario_suffix(scenario)}"
+        experiment_name = f"multi_seed_{seed}{scenario_suffix(output_key)}"
         print(f"\nMulti-seed repeat: seed={seed}, experiment={experiment_name}")
         start = time.time()
         model, loss_history = train_pinn(
@@ -1206,9 +1305,10 @@ def run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario="heterogen
             epochs=repeat_epochs,
             seed=seed,
             velocity_model_type=scenario,
+            source_locations=source_locations,
         )
         training_time = time.time() - start
-        save_loss_history(loss_history, data_path(f"loss_history_multi_seed_{seed}.csv", scenario=scenario))
+        save_loss_history(loss_history, data_path(f"loss_history_multi_seed_{seed}.csv", scenario=output_key))
 
         metric_rows = []
         for idx in snapshot_indices:
@@ -1224,13 +1324,14 @@ def run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario="heterogen
         )
         row["experiment"] = "multi_seed_repeat"
         row["scenario"] = scenario
+        row["source_case"] = source_case
         row["seed"] = seed
         row["repeat_epochs"] = repeat_epochs
         row.update(evaluate_pde_residual(model))
         rows.append(row)
 
     repeat_df = pd.DataFrame(rows)
-    repeat_df.to_csv(data_path("multi_seed_summary.csv", scenario=scenario), index=False)
+    repeat_df.to_csv(data_path("multi_seed_summary.csv", scenario=output_key), index=False)
 
     numeric_metrics = [
         "Mean_MSE",
@@ -1253,6 +1354,7 @@ def run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario="heterogen
         aggregate_rows.append(
             {
                 "scenario": scenario,
+                "source_case": source_case,
                 "metric": metric,
                 "mean": float(values.mean()),
                 "std": float(values.std(ddof=1)) if len(values) > 1 else 0.0,
@@ -1264,7 +1366,7 @@ def run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario="heterogen
         )
 
     aggregate_df = pd.DataFrame(aggregate_rows)
-    aggregate_df.to_csv(data_path("multi_seed_aggregate.csv", scenario=scenario), index=False)
+    aggregate_df.to_csv(data_path("multi_seed_aggregate.csv", scenario=output_key), index=False)
 
     print("\nMulti-seed summary:")
     print(repeat_df)
@@ -1274,9 +1376,15 @@ def run_multi_seed_repeats(x, z, t, u_fdm, snapshot_indices, scenario="heterogen
     return repeat_df
 
 
-def run_synthetic_scenarios(run_ablation=False, scenario_arg="heterogeneous", run_multi_seed=False):
+def run_synthetic_scenarios(
+    run_ablation=False,
+    scenario_arg="heterogeneous",
+    source_case="single",
+    run_multi_seed=False,
+):
     """Run one or all configured synthetic scenarios and save combined tables."""
     scenarios = resolve_scenarios(scenario_arg)
+    source_case = resolve_source_case(source_case)
     all_metrics = []
     all_summaries = []
     all_comparisons = []
@@ -1285,24 +1393,26 @@ def run_synthetic_scenarios(run_ablation=False, scenario_arg="heterogeneous", ru
         metrics_df, summary_df = run_synthetic_mode(
             run_ablation=run_ablation,
             scenario=scenario,
+            source_case=source_case,
             run_multi_seed=run_multi_seed,
         )
-        all_metrics.append(metrics_df.assign(scenario=scenario))
+        all_metrics.append(metrics_df.assign(scenario=scenario, source_case=source_case))
         all_summaries.append(summary_df)
 
-        comparison_file = data_path("model_comparison_summary.csv", scenario=scenario)
+        comparison_file = data_path("model_comparison_summary.csv", scenario=artifact_key(scenario, source_case))
         if os.path.exists(comparison_file):
             all_comparisons.append(pd.read_csv(comparison_file))
 
     combined_metrics = pd.concat(all_metrics, ignore_index=True, sort=False)
     combined_summary = pd.concat(all_summaries, ignore_index=True, sort=False)
 
-    if len(scenarios) > 1:
-        combined_metrics.to_csv("results/data/metrics_scenario_summary.csv", index=False)
-        combined_summary.to_csv("results/data/synthetic_scenario_summary.csv", index=False)
+    if len(scenarios) > 1 or source_case != "single":
+        suffix = source_case_suffix(source_case)
+        combined_metrics.to_csv(f"results/data/metrics_scenario_summary{suffix}.csv", index=False)
+        combined_summary.to_csv(f"results/data/synthetic_scenario_summary{suffix}.csv", index=False)
         if all_comparisons:
             pd.concat(all_comparisons, ignore_index=True, sort=False).to_csv(
-                "results/data/model_comparison_scenario_summary.csv",
+                f"results/data/model_comparison_scenario_summary{suffix}.csv",
                 index=False,
             )
 
@@ -1321,6 +1431,8 @@ def write_defense_report(synthetic_summary=None, real_summary=None):
         "The main proof is the controlled synthetic experiment. In this experiment, the heterogeneous velocity model, seismic source, initial conditions, boundary treatment, and finite-difference reference solution are known. This makes the comparison between FDM and PINN scientifically defensible.",
         "",
         "The robustness extension includes a second faulted heterogeneous velocity model and optional multi-seed repeats. These additions help show that the result is not tied to one easy velocity model or one lucky random initialization.",
+        "",
+        "The advanced-case extension implements the safe high-value additions: multiple seismic sources and an apparent-velocity diagnostic. Full 3D, elastic P/S-wave, and anisotropic PINNs are kept as future work because they require different governing equations, baselines, and validation data.",
         "",
         "## Secondary real-data demonstration",
         "",
@@ -1370,12 +1482,16 @@ def write_defense_report(synthetic_summary=None, real_summary=None):
         "- results/data/pde_residual_summary.csv",
         "- results/data/fdm_metadata.csv",
         "- results/data/model_comparison_summary.csv",
+        "- results/data/advanced_scope_matrix.csv",
+        "- results/data/advanced_scope_report.md",
+        "- results/data/velocity_inversion_diagnostic.csv",
         "- results/figures/comparison_relative_l2_bar.png",
         "- results/figures/comparison_correlation_bar.png",
         "- results/figures/comparison_energy_ratio_bar.png",
         "- results/data/ablation_summary.csv, if ablation mode was executed",
         "- results/data/synthetic_scenario_summary.csv, if --scenario all was executed",
         "- results/data/model_comparison_scenario_summary.csv, if --scenario all was executed",
+        "- results/data/*_multi_source.csv, if --source-case multi_source was executed",
         "- results/data/multi_seed_summary.csv, if --multi-seed was executed",
         "- results/data/multi_seed_aggregate.csv, if --multi-seed was executed",
         "- results/data/real_metrics.csv, if real mode was executed",
@@ -1407,11 +1523,17 @@ def write_defense_report(synthetic_summary=None, real_summary=None):
         file.write("\n".join(lines))
 
 
-def run_all_mode(run_ablation=False, scenario_arg="heterogeneous", run_multi_seed=False):
+def run_all_mode(
+    run_ablation=False,
+    scenario_arg="heterogeneous",
+    source_case="single",
+    run_multi_seed=False,
+):
     print("Running full defense pipeline: synthetic experiment + real-data reconstruction if available.")
     synthetic_metrics, synthetic_summary = run_synthetic_scenarios(
         run_ablation=run_ablation,
         scenario_arg=scenario_arg,
+        source_case=source_case,
         run_multi_seed=run_multi_seed,
     )
 
@@ -1447,13 +1569,29 @@ def main():
         action="store_true",
         help="Run shorter repeated PINN trainings with multiple random seeds.",
     )
+    parser.add_argument(
+        "--source-case",
+        choices=["single", "multi_source"],
+        default="single",
+        help="Use the default single source or the optional multi-source shot case.",
+    )
     args = parser.parse_args()
 
     os.makedirs("results/figures", exist_ok=True)
     os.makedirs("results/data", exist_ok=True)
 
-    print_config(args.mode, scenario=args.scenario, run_multi_seed=args.multi_seed)
-    save_config_snapshot(args.mode, scenario=args.scenario, run_multi_seed=args.multi_seed)
+    print_config(
+        args.mode,
+        scenario=args.scenario,
+        source_case=args.source_case,
+        run_multi_seed=args.multi_seed,
+    )
+    save_config_snapshot(
+        args.mode,
+        scenario=args.scenario,
+        source_case=args.source_case,
+        run_multi_seed=args.multi_seed,
+    )
 
     if args.mode == "real":
         real_summary = run_real_mode()
@@ -1462,6 +1600,7 @@ def main():
         _, synthetic_summary = run_synthetic_scenarios(
             run_ablation=args.ablation,
             scenario_arg=args.scenario,
+            source_case=args.source_case,
             run_multi_seed=args.multi_seed,
         )
         synthetic_summary.to_csv("results/data/summary.csv", index=False)
@@ -1470,8 +1609,11 @@ def main():
         run_all_mode(
             run_ablation=args.ablation,
             scenario_arg=args.scenario,
+            source_case=args.source_case,
             run_multi_seed=args.multi_seed,
         )
+
+    write_thesis_assets()
 
     print("\nProject completed.")
     print("Generated figures are saved in: results/figures")

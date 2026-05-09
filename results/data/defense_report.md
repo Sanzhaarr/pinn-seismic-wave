@@ -7,9 +7,13 @@ Project topic:
 
 The main proof is the controlled synthetic experiment. In this experiment, the heterogeneous velocity model, seismic source, initial conditions, boundary treatment, and finite-difference reference solution are known. This makes the comparison between FDM and PINN scientifically defensible.
 
+The robustness extension includes a second faulted heterogeneous velocity model and optional multi-seed repeats. These additions help show that the result is not tied to one easy velocity model or one lucky random initialization.
+
+The advanced-case extension implements the safe high-value additions: multiple seismic sources and an apparent-velocity diagnostic. Full 3D, elastic P/S-wave, and anisotropic PINNs are kept as future work because they require different governing equations, baselines, and validation data.
+
 ## Secondary real-data demonstration
 
-The real seismic section is included as an applied demonstration. It shows that the neural representation can reconstruct a real seismic section, but it should be described as real-data reconstruction with physics-inspired smoothness regularization unless the exact field velocity model, acquisition geometry, and source wavelet are available.
+The real seismic section is included as an applied demonstration. It shows that the neural representation can reconstruct a real seismic section, but it should be described as real-data reconstruction with physics-inspired smoothness regularization unless the exact field velocity model, acquisition geometry, and source wavelet are available. The file results/data/real_physical_validation.csv records this claim level explicitly.
 
 ## Recommended defense wording
 
@@ -22,8 +26,9 @@ Homogeneous, layered, coarse-grid FDM, and sparse trilinear interpolation baseli
 
 ## Synthetic experiment summary
 
-     mode  num_snapshots  Mean_MSE  Mean_MAE  Mean_Relative_L2_Error  Mean_NRMSE  Mean_PSNR_dB  Mean_Correlation  Homogeneous_Mean_Relative_L2_Error  Homogeneous_Mean_NRMSE  Homogeneous_Mean_Correlation  Layered_Mean_Relative_L2_Error  Layered_Mean_NRMSE  Layered_Mean_Correlation  Coarse_Mean_Relative_L2_Error  Coarse_Mean_NRMSE  Coarse_Mean_Correlation  SparseInterp_Mean_Relative_L2_Error  SparseInterp_Mean_NRMSE  SparseInterp_Mean_Correlation  SparseInterp_sample_fraction  FDM_time_seconds  Homogeneous_FDM_time_seconds  Layered_FDM_time_seconds  Coarse_FDM_time_seconds  SparseInterp_time_seconds Neural_model_name Neural_display_name  PINN_training_time_seconds
-synthetic              6  0.000002  0.001067                0.242569    0.015778     36.297782          0.952448                             0.91795                0.139448                      0.376036                        0.424303            0.067746                  0.845473                       0.756462           0.102392                 0.695515                             0.592434                 0.063264                       0.804804                      0.018753          0.006975                      0.006101                  0.006668                 0.075148                   0.039167     weak_pde_pinn       Weak-PDE PINN                  361.447305
+     mode      scenario  source_case  num_snapshots  Mean_MSE  Mean_MAE  Mean_Relative_L2_Error  Mean_NRMSE  Mean_PSNR_dB  Mean_Correlation  Homogeneous_Mean_Relative_L2_Error  Homogeneous_Mean_NRMSE  Homogeneous_Mean_Correlation  Layered_Mean_Relative_L2_Error  Layered_Mean_NRMSE  Layered_Mean_Correlation  Coarse_Mean_Relative_L2_Error  Coarse_Mean_NRMSE  Coarse_Mean_Correlation  SparseInterp_Mean_Relative_L2_Error  SparseInterp_Mean_NRMSE  SparseInterp_Mean_Correlation  SparseInterp_sample_fraction  FDM_time_seconds  Homogeneous_FDM_time_seconds  Layered_FDM_time_seconds  Coarse_FDM_time_seconds  SparseInterp_time_seconds  VelocityDiagnostic_apparent_velocity                        Neural_model_name Neural_display_name  PINN_training_time_seconds
+synthetic heterogeneous multi_source              6  0.000003  0.001269                0.153181    0.015922     36.142268          0.984259                            0.996834                0.157172                      0.344402                        0.502597            0.083453                  0.857611                       0.789517           0.119453                 0.650068                             0.558046                 0.072665                       0.839240                      0.018753          0.008286                      0.007213                  0.006518                 0.052198                   0.039191                              0.474763 weak_pde_pinn_heterogeneous_multi_source       Weak-PDE PINN                  266.248495
+synthetic       faulted multi_source              6  0.000003  0.001296                0.162875    0.016525     35.856416          0.983521                            1.080483                0.152398                      0.334632                        1.013259            0.148298                  0.528407                       0.817733           0.112161                 0.598955                             0.567047                 0.069243                       0.832202                      0.018753          0.007296                      0.006928                  0.006507                 0.052129                   0.038257                              0.368871       weak_pde_pinn_faulted_multi_source       Weak-PDE PINN                  263.500010
 
 ## Files to show during defense
 
@@ -46,11 +51,22 @@ synthetic              6  0.000002  0.001067                0.242569    0.015778
 - results/data/pde_residual_summary.csv
 - results/data/fdm_metadata.csv
 - results/data/model_comparison_summary.csv
+- results/data/advanced_scope_matrix.csv
+- results/data/advanced_scope_report.md
+- results/data/velocity_inversion_diagnostic.csv
 - results/figures/comparison_relative_l2_bar.png
 - results/figures/comparison_correlation_bar.png
 - results/figures/comparison_energy_ratio_bar.png
 - results/data/ablation_summary.csv, if ablation mode was executed
+- results/data/synthetic_scenario_summary.csv, if --scenario all was executed
+- results/data/model_comparison_scenario_summary.csv, if --scenario all was executed
+- results/data/*_multi_source.csv, if --source-case multi_source was executed
+- results/data/multi_seed_summary.csv, if --multi-seed was executed
+- results/data/multi_seed_aggregate.csv, if --multi-seed was executed
 - results/data/real_metrics.csv, if real mode was executed
+- results/data/real_physical_validation.csv, if real mode was executed
+- results/data/real_physical_validation_report.md, if real mode was executed
+- results/figures/real_validation_spectrum.png, if real mode was executed
 
 ## Important limitation
 

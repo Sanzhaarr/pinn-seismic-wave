@@ -1,6 +1,9 @@
 parameter,value
 mode,synthetic
-config_version,seismic-pinn-defense-v6-ablation-sparse-baseline
+scenario_request,all
+source_case,multi_source
+multi_seed_requested,True
+config_version,seismic-pinn-defense-v7-robustness-real-validation
 device,mps
 NX,70
 NZ,70
@@ -10,6 +13,8 @@ COARSE_NZ,36
 COARSE_NT,220
 SPARSE_BASELINE_TIME_STRIDE,4
 SPARSE_BASELINE_SPACE_STRIDE,4
+SYNTHETIC_SCENARIOS,"heterogeneous,faulted"
+MULTI_SOURCE_COUNT,3
 T_MAX,0.6
 SOURCE_FREQUENCY,8.0
 SOURCE_AMPLITUDE,1.0
@@ -32,3 +37,5 @@ LAMBDA_AMPLITUDE,0.01
 PDE_WARMUP_EPOCHS,200
 REAL_SMOOTHNESS_WEIGHT,0.001
 ABLATION_EPOCHS,700
+MULTI_SEED_VALUES,"7,42,123"
+MULTI_SEED_EPOCHS,700

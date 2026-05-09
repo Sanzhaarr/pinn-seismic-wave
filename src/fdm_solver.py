@@ -38,6 +38,34 @@ def ricker_wavelet(t, f0=SOURCE_FREQUENCY, t0=SOURCE_T0, amplitude=SOURCE_AMPLIT
     return amplitude * (1.0 - 2.0 * pi2 * f0 ** 2 * tau2) * np.exp(-pi2 * f0 ** 2 * tau2)
 
 
+def normalize_sources(sources=None):
+    """Return source dictionaries with all source parameters filled in."""
+    if not sources:
+        sources = [
+            {
+                "x": SOURCE_X,
+                "z": SOURCE_Z,
+                "frequency": SOURCE_FREQUENCY,
+                "t0": SOURCE_T0,
+                "amplitude": SOURCE_AMPLITUDE,
+            }
+        ]
+
+    normalized = []
+    for index, source in enumerate(sources):
+        normalized.append(
+            {
+                "id": source.get("id", f"source_{index}"),
+                "x": float(source.get("x", SOURCE_X)),
+                "z": float(source.get("z", SOURCE_Z)),
+                "frequency": float(source.get("frequency", SOURCE_FREQUENCY)),
+                "t0": float(source.get("t0", SOURCE_T0)),
+                "amplitude": float(source.get("amplitude", SOURCE_AMPLITUDE)),
+            }
+        )
+    return normalized
+
+
 def create_velocity_model(nx=NX, nz=NZ, model_type="heterogeneous"):
     """
     Create a velocity model for the FDM simulation.
@@ -130,10 +158,10 @@ def build_absorbing_mask(nx, nz, damping_width=12, damping_strength=0.035):
     return mask.astype(np.float32)
 
 
-def find_source_indices(x, z):
+def find_source_indices(x, z, source_x=SOURCE_X, source_z=SOURCE_Z):
     """Return integer grid indices closest to the configured source location."""
-    sx = int(np.argmin(np.abs(x - SOURCE_X)))
-    sz = int(np.argmin(np.abs(z - SOURCE_Z)))
+    sx = int(np.argmin(np.abs(x - source_x)))
+    sz = int(np.argmin(np.abs(z - source_z)))
     return sx, sz
 
 
@@ -151,7 +179,14 @@ def compute_fdm_stability_metadata(c, dx, dz, dt):
     }
 
 
-def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False, nx=None, nz=None, nt=None):
+def solve_wave_equation_fdm(
+    model_type="heterogeneous",
+    return_metadata=False,
+    nx=None,
+    nz=None,
+    nt=None,
+    sources=None,
+):
     """
     Solve the 2D acoustic wave equation with a second-order finite-difference scheme.
 
@@ -183,7 +218,11 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False, n
 
     u = np.zeros((nt, nx, nz), dtype=np.float32)
 
-    sx, sz = find_source_indices(x, z)
+    active_sources = normalize_sources(sources)
+    source_grid = []
+    for source in active_sources:
+        sx, sz = find_source_indices(x, z, source_x=source["x"], source_z=source["z"])
+        source_grid.append((sx, sz, source))
 
     damping_width = max(10, min(nx, nz) // 7)
     absorbing_mask = build_absorbing_mask(nx, nz, damping_width=damping_width)
@@ -207,12 +246,33 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False, n
 
         # Point-source forcing. Dividing by the cell area makes the discrete
         # delta source comparable across grid resolutions.
-        u[n + 1, sx, sz] += dt2 * ricker_wavelet(t[n]) / (dx * dz)
+        for sx, sz, source in source_grid:
+            u[n + 1, sx, sz] += (
+                dt2
+                * ricker_wavelet(
+                    t[n],
+                    f0=source["frequency"],
+                    t0=source["t0"],
+                    amplitude=source["amplitude"],
+                )
+                / (dx * dz)
+            )
 
         # Absorbing boundary to reduce artificial edge reflections.
         u[n + 1] *= absorbing_mask
 
     if return_metadata:
+        first_sx, first_sz, first_source = source_grid[0]
+        source_summary = "; ".join(
+            (
+                f"{source['id']}@"
+                f"({float(x[sx]):.4f},{float(z[sz]):.4f}),"
+                f"f={source['frequency']:.3f},"
+                f"t0={source['t0']:.3f},"
+                f"amp={source['amplitude']:.3f}"
+            )
+            for sx, sz, source in source_grid
+        )
         metadata = {
             "model_type": model_type,
             "nx": nx,
@@ -225,16 +285,18 @@ def solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=False, n
             "c_max": stability["c_max"],
             "c_mean": stability["c_mean"],
             "cfl": cfl,
-            "source_x_index": sx,
-            "source_z_index": sz,
-            "source_x": float(x[sx]),
-            "source_z": float(z[sz]),
+            "num_sources": len(source_grid),
+            "source_x_index": first_sx,
+            "source_z_index": first_sz,
+            "source_x": float(x[first_sx]),
+            "source_z": float(z[first_sz]),
+            "source_summary": source_summary,
             "max_abs_amplitude": float(np.max(np.abs(u))),
             "damping_width": damping_width,
             "damping_min": float(np.min(absorbing_mask)),
             "damping_max": float(np.max(absorbing_mask)),
-            "source_frequency": SOURCE_FREQUENCY,
-            "source_amplitude": SOURCE_AMPLITUDE,
+            "source_frequency": first_source["frequency"],
+            "source_amplitude": first_source["amplitude"],
             "source_discretization": "point_delta_scaled_by_cell_area",
         }
         return x, z, t, c, u, metadata

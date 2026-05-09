@@ -79,16 +79,32 @@ def plot_wave_snapshot(u, time_index, title, path):
     plt.close()
 
 
-def plot_source_wavelet(t, path="results/figures/ricker_wavelet.png"):
+def plot_source_wavelet(t, path="results/figures/ricker_wavelet.png", sources=None):
     """Plot the Ricker wavelet source used in the FDM simulation."""
     _ensure_parent_dir(path)
 
     plt.figure(figsize=(7.0, 4.5))
-    plt.plot(t, ricker_wavelet(t))
+    if not sources:
+        plt.plot(t, ricker_wavelet(t), label="source")
+    else:
+        total = np.zeros_like(t, dtype=np.float64)
+        for index, source in enumerate(sources):
+            values = ricker_wavelet(
+                t,
+                f0=source.get("frequency", 8.0),
+                t0=source.get("t0", 0.15),
+                amplitude=source.get("amplitude", 1.0),
+            )
+            total = total + values
+            label = source.get("id", f"source_{index}")
+            plt.plot(t, values, alpha=0.75, label=label)
+        if len(sources) > 1:
+            plt.plot(t, total, color="black", linewidth=1.6, label="sum")
     plt.xlabel("Time")
     plt.ylabel("Source amplitude")
     plt.title("Ricker Wavelet Source")
     plt.grid(True, alpha=0.3)
+    plt.legend()
     plt.tight_layout()
     plt.savefig(path, dpi=300, bbox_inches="tight")
     plt.close()

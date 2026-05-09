@@ -63,6 +63,15 @@ SOURCE_FREQUENCY = 8.0
 SOURCE_T0 = 0.15
 SOURCE_AMPLITUDE = 1.0
 
+# Optional multi-shot source case. This is a useful extension because it tests
+# whether the same PINN machinery can learn interacting wavefronts without
+# changing the governing equation.
+MULTI_SOURCE_DEFINITIONS = [
+    {"id": "left_shot", "x": 0.28, "z": 0.36, "frequency": 8.0, "t0": 0.12, "amplitude": 0.75},
+    {"id": "center_shot", "x": 0.50, "z": 0.50, "frequency": 8.0, "t0": 0.15, "amplitude": 0.80},
+    {"id": "right_shot", "x": 0.72, "z": 0.34, "frequency": 10.0, "t0": 0.18, "amplitude": 0.65},
+]
+
 # -----------------------------------------------------------------------------
 # PINN architecture defaults
 # -----------------------------------------------------------------------------

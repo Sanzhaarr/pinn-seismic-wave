@@ -1,0 +1,4 @@
+source_id,source_x,source_z,source_t0,apparent_velocity,fit_intercept,fit_r2,num_time_samples,diagnostic,claim_level,scenario,source_case
+left_shot,0.28,0.36,0.12,0.6974197489125892,0.09237108780930178,0.9858604834823472,165,energy_radius_growth,apparent_velocity_only_not_full_inversion,heterogeneous,multi_source
+center_shot,0.5,0.5,0.15,0.5691904702084293,0.15135997033898266,0.9777836522452104,154,energy_radius_growth,apparent_velocity_only_not_full_inversion,heterogeneous,multi_source
+right_shot,0.72,0.34,0.18,0.1576801205933864,0.3816607063861047,0.5139254788088521,143,energy_radius_growth,apparent_velocity_only_not_full_inversion,heterogeneous,multi_source

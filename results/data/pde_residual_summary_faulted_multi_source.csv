@@ -1,0 +1,2 @@
+mode,scenario,source_case,Residual_MAE,Residual_RMSE,Residual_MaxAbs
+weak_pde_pinn_faulted_multi_source,faulted,multi_source,157.32550048828125,215.0532684326172,1046.5526123046875

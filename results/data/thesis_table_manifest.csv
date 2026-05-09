@@ -1,0 +1,17 @@
+id,path,caption,thesis_section,priority,exists
+scenario_summary_multi_source,results/data/synthetic_scenario_summary_multi_source.csv,"Final two-scenario multi-source synthetic summary.","Results / Summary",1,True
+model_comparison_multi_source,results/data/model_comparison_scenario_summary_multi_source.csv,"Final comparison between PINN, traditional baselines, ablations, and seed repeats.","Results / Model comparison",1,True
+metrics_scenario_multi_source,results/data/metrics_scenario_summary_multi_source.csv,"Per-snapshot PINN metrics for both final multi-source scenarios.","Results / PINN accuracy",1,True
+ablation_heterogeneous_multi_source,results/data/ablation_summary_heterogeneous_multi_source.csv,"Ablation study for the heterogeneous multi-source case.","Results / Ablation study",2,True
+ablation_faulted_multi_source,results/data/ablation_summary_faulted_multi_source.csv,"Ablation study for the faulted multi-source case.","Results / Ablation study",2,True
+multi_seed_heterogeneous_multi_source,results/data/multi_seed_aggregate_heterogeneous_multi_source.csv,"Multi-seed robustness statistics for the heterogeneous multi-source case.","Results / Robustness",2,True
+multi_seed_faulted_multi_source,results/data/multi_seed_aggregate_faulted_multi_source.csv,"Multi-seed robustness statistics for the faulted multi-source case.","Results / Robustness",2,True
+pde_residual_heterogeneous_multi_source,results/data/pde_residual_summary_heterogeneous_multi_source.csv,"PDE residual diagnostics for the heterogeneous multi-source PINN.","Results / Physical consistency",2,True
+pde_residual_faulted_multi_source,results/data/pde_residual_summary_faulted_multi_source.csv,"PDE residual diagnostics for the faulted multi-source PINN.","Results / Physical consistency",2,True
+fdm_metadata_heterogeneous_multi_source,results/data/fdm_metadata_heterogeneous_multi_source.csv,"FDM stability, grid, source, and velocity metadata for the heterogeneous case.","Methodology / Numerical setup",2,True
+fdm_metadata_faulted_multi_source,results/data/fdm_metadata_faulted_multi_source.csv,"FDM stability, grid, source, and velocity metadata for the faulted case.","Methodology / Numerical setup",2,True
+velocity_diagnostic_heterogeneous_multi_source,results/data/velocity_inversion_diagnostic_heterogeneous_multi_source.csv,"Apparent-velocity diagnostic for the heterogeneous multi-source wavefield.","Discussion / Inversion diagnostic",3,True
+velocity_diagnostic_faulted_multi_source,results/data/velocity_inversion_diagnostic_faulted_multi_source.csv,"Apparent-velocity diagnostic for the faulted multi-source wavefield.","Discussion / Inversion diagnostic",3,True
+real_validation,results/data/real_physical_validation.csv,"Real-data validation-level diagnostics, if real mode was executed.","Additional experiment / Real data",3,True
+advanced_scope,results/data/advanced_scope_matrix.csv,"Advanced-case scope matrix distinguishing implemented extensions from future work.","Discussion / Future work",3,True
+legacy_model_comparison,results/data/model_comparison_summary.csv,"Legacy single-source comparison table, retained as backup.","Appendix / Backup tables",4,True

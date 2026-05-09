@@ -1,0 +1,23 @@
+id,path,caption,thesis_section,priority,exists
+velocity_model_heterogeneous_multi_source,results/figures/velocity_model_heterogeneous_multi_source.png,"Primary heterogeneous velocity model used in the final multi-source experiment.","Methodology / Synthetic setup",1,True
+velocity_model_faulted_multi_source,results/figures/velocity_model_faulted_multi_source.png,"Faulted heterogeneous velocity model used for robustness validation.","Methodology / Synthetic setup",1,True
+ricker_wavelet_multi_source,results/figures/ricker_wavelet_heterogeneous_multi_source.png,"Multiple Ricker source wavelets used in the final finite-difference simulation.","Methodology / Source model",1,True
+fdm_snapshot_heterogeneous_middle,results/figures/fdm_snapshot_99_heterogeneous_multi_source.png,"Finite-difference reference wavefield for the heterogeneous multi-source case.","Results / Reference simulation",1,True
+fdm_snapshot_faulted_middle,results/figures/fdm_snapshot_99_faulted_multi_source.png,"Finite-difference reference wavefield for the faulted multi-source case.","Results / Reference simulation",1,True
+pinn_comparison_heterogeneous_middle,results/figures/comparison_t_99_heterogeneous_multi_source.png,"PINN prediction, FDM reference, and error for the heterogeneous multi-source case.","Results / PINN vs FDM",1,True
+pinn_comparison_faulted_middle,results/figures/comparison_t_99_faulted_multi_source.png,"PINN prediction, FDM reference, and error for the faulted multi-source case.","Results / PINN vs FDM",1,True
+pinn_comparison_faulted_late,results/figures/comparison_t_198_faulted_multi_source.png,"Late-time PINN comparison for the harder faulted multi-source case.","Results / PINN vs FDM",1,True
+homogeneous_baseline_multi_source,results/figures/baseline_comparison_t_99_faulted_multi_source.png,"Traditional homogeneous FDM baseline compared with the faulted heterogeneous reference.","Results / Traditional baselines",2,True
+layered_baseline_multi_source,results/figures/layered_baseline_comparison_t_99_faulted_multi_source.png,"Traditional layered FDM baseline compared with the faulted heterogeneous reference.","Results / Traditional baselines",2,True
+coarse_baseline_multi_source,results/figures/coarse_baseline_comparison_t_99_faulted_multi_source.png,"Coarse-grid heterogeneous FDM baseline interpolated to the reference grid.","Results / Traditional baselines",2,True
+sparse_interpolation_baseline_multi_source,results/figures/sparse_interpolation_comparison_t_99_faulted_multi_source.png,"Sparse trilinear interpolation baseline compared with the faulted reference wavefield.","Results / Non-neural reconstruction baseline",2,True
+loss_curve_heterogeneous_multi_source,results/figures/loss_curve_heterogeneous_multi_source.png,"PINN training loss components for the heterogeneous multi-source case.","Results / Training dynamics",1,True
+loss_curve_faulted_multi_source,results/figures/loss_curve_faulted_multi_source.png,"PINN training loss components for the faulted multi-source case.","Results / Training dynamics",2,True
+relative_l2_bar_heterogeneous_multi_source,results/figures/comparison_relative_l2_bar_heterogeneous_multi_source.png,"Mean relative L2 error comparison for the heterogeneous multi-source case.","Results / Quantitative comparison",1,True
+relative_l2_bar_faulted_multi_source,results/figures/comparison_relative_l2_bar_faulted_multi_source.png,"Mean relative L2 error comparison for the faulted multi-source case.","Results / Quantitative comparison",1,True
+correlation_bar_faulted_multi_source,results/figures/comparison_correlation_bar_faulted_multi_source.png,"Mean correlation comparison for the faulted multi-source case.","Results / Quantitative comparison",2,True
+real_section_reference,results/figures/real_section_reference.png,"Normalized real seismic section used for the applied reconstruction demonstration.","Additional experiment / Real data",3,True
+real_section_comparison,results/figures/real_section_comparison.png,"Real-section reconstruction comparison using the trained neural representation.","Additional experiment / Real data",3,True
+real_validation_spectrum,results/figures/real_validation_spectrum.png,"Spectral diagnostic for the real-data reconstruction demonstration.","Additional experiment / Real data",3,True
+legacy_velocity_model,results/figures/velocity_model.png,"Legacy single-source heterogeneous velocity model, retained as backup.","Appendix / Backup figures",4,True
+legacy_pinn_comparison_middle,results/figures/comparison_t_99.png,"Legacy single-source PINN comparison, retained as backup.","Appendix / Backup figures",4,True

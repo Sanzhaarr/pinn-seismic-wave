@@ -1,0 +1,2 @@
+mode,scenario,source_case,Residual_MAE,Residual_RMSE,Residual_MaxAbs
+weak_pde_pinn_heterogeneous_multi_source,heterogeneous,multi_source,164.24383544921875,220.72593688964844,1058.161376953125

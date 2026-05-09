@@ -44,8 +44,9 @@ class ResidualBlock(nn.Module):
     where the model must represent oscillatory and multi-scale behavior.
     """
 
-    def __init__(self, hidden_dim: int, activation: str):
+    def __init__(self, hidden_dim: int, activation: str, residual_scale: float = 0.1):
         super().__init__()
+        self.residual_scale = residual_scale
         self.layers = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             SeismicPINN._build_activation(activation),
@@ -54,7 +55,7 @@ class ResidualBlock(nn.Module):
         self.activation = SeismicPINN._build_activation(activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.activation(x + self.layers(x))
+        return self.activation(x + self.residual_scale * self.layers(x))
 
 
 class SeismicPINN(nn.Module):
@@ -76,6 +77,7 @@ class SeismicPINN(nn.Module):
         activation: str = "tanh",
         output_scale: float = 1.0,
         use_residual_blocks: bool = True,
+        residual_scale: float = 0.1,
     ):
         super().__init__()
 
@@ -85,6 +87,7 @@ class SeismicPINN(nn.Module):
         self.use_fourier = use_fourier
         self.output_scale = output_scale
         self.use_residual_blocks = use_residual_blocks
+        self.residual_scale = residual_scale
 
         if use_fourier:
             self.encoder = FourierFeatures(
@@ -103,7 +106,7 @@ class SeismicPINN(nn.Module):
                 self._build_activation(activation),
             ]
             for _ in range(depth - 1):
-                layers.append(ResidualBlock(hidden_dim, activation))
+                layers.append(ResidualBlock(hidden_dim, activation, residual_scale=residual_scale))
             layers.append(nn.Linear(hidden_dim, 1))
         else:
             layers = [

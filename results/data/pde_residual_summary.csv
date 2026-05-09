@@ -1,0 +1,2 @@
+mode,Residual_MAE,Residual_RMSE,Residual_MaxAbs
+data_only_nn,,,

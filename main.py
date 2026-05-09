@@ -11,7 +11,14 @@ from src import config as cfg
 from src.fdm_solver import solve_wave_equation_fdm
 from src.train_pinn import evaluate_pde_residual, predict_snapshot, train_pinn
 from src.metrics import compute_all_metrics, max_abs_value
-from src.plots import plot_velocity_model, plot_wave_snapshot, plot_comparison, plot_loss_curve
+from src.plots import (
+    plot_baseline_comparison,
+    plot_comparison,
+    plot_loss_curve,
+    plot_source_wavelet,
+    plot_velocity_model,
+    plot_wave_snapshot,
+)
 from src.pinn_model import SeismicPINN
 
 
@@ -22,7 +29,10 @@ def print_config(mode: str):
     print(f"Config version: {getattr(cfg, 'CONFIG_VERSION', 'NO_CONFIG_VERSION_FOUND')}")
     print(f"Grid: NX={cfg.NX}, NZ={cfg.NZ}, NT={cfg.NT}")
     print(f"Training: EPOCHS={cfg.EPOCHS}, N_DATA={cfg.N_DATA}, N_COLLOCATION={cfg.N_COLLOCATION}")
-    print(f"Loss weights: PDE={cfg.LAMBDA_PDE}, DATA={cfg.LAMBDA_DATA}, IC={cfg.LAMBDA_IC}, BC={cfg.LAMBDA_BC}")
+    print(
+        f"Loss weights: PDE={cfg.LAMBDA_PDE}, DATA={cfg.LAMBDA_DATA}, "
+        f"IC={cfg.LAMBDA_IC}, BC={cfg.LAMBDA_BC}, AMP={getattr(cfg, 'LAMBDA_AMPLITUDE', 0.0)}"
+    )
     print("================================\n")
 
 
@@ -52,6 +62,7 @@ def save_config_snapshot(mode: str):
         {"parameter": "LAMBDA_DATA", "value": cfg.LAMBDA_DATA},
         {"parameter": "LAMBDA_IC", "value": cfg.LAMBDA_IC},
         {"parameter": "LAMBDA_BC", "value": cfg.LAMBDA_BC},
+        {"parameter": "LAMBDA_AMPLITUDE", "value": getattr(cfg, "LAMBDA_AMPLITUDE", 0.0)},
     ]
     pd.DataFrame(config_rows).to_csv(f"results/data/config_snapshot_{mode}.csv", index=False)
 
@@ -71,80 +82,71 @@ def save_loss_history(loss_history, path):
     pd.DataFrame(loss_history).to_csv(path, index=False)
 
 
-def plot_baseline_comparison(reference, baseline, time_index, path):
-    """Plot heterogeneous FDM reference against homogeneous FDM baseline."""
+
+
+
+
+def summarize_metric_table(df, model_name, role, training_time_seconds=np.nan):
+    """Create one compact comparison row from a per-snapshot metric table."""
+    return {
+        "model": model_name,
+        "role": role,
+        "Mean_MSE": df["MSE"].mean(),
+        "Mean_MAE": df["MAE"].mean(),
+        "Mean_Relative_L2_Error": df["Relative_L2_Error"].mean(),
+        "Mean_NRMSE": df["NRMSE"].mean(),
+        "Mean_NMAE": df["NMAE"].mean() if "NMAE" in df.columns else np.nan,
+        "Mean_Relative_Max_Error": df["Relative_Max_Error"].mean() if "Relative_Max_Error" in df.columns else np.nan,
+        "Mean_PSNR_dB": df["PSNR_dB"].mean(),
+        "Mean_Correlation": df["Correlation"].mean(),
+        "Mean_Energy_Ratio": df["Energy_Ratio"].mean() if "Energy_Ratio" in df.columns else np.nan,
+        "Mean_Bias": df["Mean_Bias"].mean() if "Mean_Bias" in df.columns else np.nan,
+        "Training_time_seconds": training_time_seconds,
+    }
+
+
+def plot_metric_bar(summary_df, metric, path, title=None):
+    """Save a bar chart comparing models using one metric."""
     import matplotlib.pyplot as plt
 
-    ref = reference[time_index]
-    base = baseline[time_index]
-    error = np.abs(ref - base)
+    if metric not in summary_df.columns:
+        return
 
-    amplitude_limit = np.percentile(
-        np.abs(np.concatenate([ref.reshape(-1), base.reshape(-1)])),
-        99.0,
-    )
-    if not np.isfinite(amplitude_limit) or amplitude_limit <= 0:
-        amplitude_limit = max(max_abs_value(ref), max_abs_value(base), 1.0)
+    plot_df = summary_df.dropna(subset=[metric]).copy()
+    if plot_df.empty:
+        return
 
-    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8), constrained_layout=True)
-
-    im0 = axes[0].imshow(
-        ref.T,
-        origin="lower",
-        extent=[0, 1, 0, 1],
-        aspect="auto",
-        cmap="seismic",
-        vmin=-amplitude_limit,
-        vmax=amplitude_limit,
-    )
-    axes[0].set_title("Heterogeneous FDM Reference")
-    axes[0].set_xlabel("x")
-    axes[0].set_ylabel("z")
-    fig.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04)
-
-    im1 = axes[1].imshow(
-        base.T,
-        origin="lower",
-        extent=[0, 1, 0, 1],
-        aspect="auto",
-        cmap="seismic",
-        vmin=-amplitude_limit,
-        vmax=amplitude_limit,
-    )
-    axes[1].set_title("Homogeneous FDM Baseline")
-    axes[1].set_xlabel("x")
-    axes[1].set_ylabel("z")
-    fig.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04)
-
-    im2 = axes[2].imshow(
-        error.T,
-        origin="lower",
-        extent=[0, 1, 0, 1],
-        aspect="auto",
-    )
-    axes[2].set_title("Baseline Absolute Error")
-    axes[2].set_xlabel("x")
-    axes[2].set_ylabel("z")
-    fig.colorbar(im2, ax=axes[2], fraction=0.046, pad=0.04)
-
-    fig.savefig(path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-
-
-def plot_source_wavelet(t, path="results/figures/ricker_wavelet.png"):
-    """Plot the configured Ricker wavelet source."""
-    import matplotlib.pyplot as plt
-    from src.fdm_solver import ricker_wavelet
-
-    plt.figure(figsize=(7, 4.5))
-    plt.plot(t, ricker_wavelet(t))
-    plt.xlabel("Time")
-    plt.ylabel("Source amplitude")
-    plt.title("Ricker Wavelet Source")
-    plt.grid(True, alpha=0.3)
+    plt.figure(figsize=(8, 4.8))
+    plt.bar(plot_df["model"], plot_df[metric])
+    plt.ylabel(metric)
+    plt.xlabel("Model")
+    plt.title(title or f"Model Comparison: {metric}")
+    plt.xticks(rotation=20, ha="right")
     plt.tight_layout()
     plt.savefig(path, dpi=300, bbox_inches="tight")
     plt.close()
+
+
+def save_model_comparison_figures(comparison_df):
+    """Save the most important dissertation comparison charts."""
+    plot_metric_bar(
+        comparison_df,
+        "Mean_Relative_L2_Error",
+        "results/figures/comparison_relative_l2_bar.png",
+        "Relative L2 Error Comparison",
+    )
+    plot_metric_bar(
+        comparison_df,
+        "Mean_Correlation",
+        "results/figures/comparison_correlation_bar.png",
+        "Correlation Comparison",
+    )
+    plot_metric_bar(
+        comparison_df,
+        "Mean_Energy_Ratio",
+        "results/figures/comparison_energy_ratio_bar.png",
+        "Energy Ratio Comparison",
+    )
 
 
 def load_real_section():
@@ -363,7 +365,7 @@ def run_real_mode():
 
     return df
 
-def run_synthetic_mode():
+def run_synthetic_mode(run_ablation=False):
     print("Step 1: Running heterogeneous finite difference simulation...")
     start_fdm = time.time()
     result = solve_wave_equation_fdm(model_type="heterogeneous", return_metadata=True)
@@ -375,7 +377,7 @@ def run_synthetic_mode():
     print(f"FDM CFL number: {fdm_metadata['cfl']:.6f}")
     print(f"Reference wavefield max amplitude: {max_abs_value(u_fdm):.6e}")
 
-    print("Step 2: Running homogeneous finite difference baseline...")
+    print("Step 2: Running traditional finite difference baselines...")
     start_baseline = time.time()
     baseline_result = solve_wave_equation_fdm(model_type="homogeneous", return_metadata=True)
     baseline_time = time.time() - start_baseline
@@ -384,7 +386,15 @@ def run_synthetic_mode():
     print(f"Homogeneous baseline completed in {baseline_time:.2f} seconds")
     print(f"Homogeneous baseline max amplitude: {baseline_metadata['max_abs_amplitude']:.6e}")
 
-    pd.DataFrame([fdm_metadata, baseline_metadata]).to_csv(
+    start_layered = time.time()
+    layered_result = solve_wave_equation_fdm(model_type="layered", return_metadata=True)
+    layered_time = time.time() - start_layered
+    _, _, _, c_layered, u_layered, layered_metadata = layered_result
+
+    print(f"Layered baseline completed in {layered_time:.2f} seconds")
+    print(f"Layered baseline max amplitude: {layered_metadata['max_abs_amplitude']:.6e}")
+
+    pd.DataFrame([fdm_metadata, baseline_metadata, layered_metadata]).to_csv(
         "results/data/fdm_metadata.csv",
         index=False,
     )
@@ -393,6 +403,11 @@ def run_synthetic_mode():
     plot_velocity_model(
         c_homogeneous,
         path="results/figures/homogeneous_velocity_model.png",
+    )
+    plot_velocity_model(
+        c_layered,
+        path="results/figures/layered_velocity_model.png",
+        title="Layered Baseline Velocity Model",
     )
     plot_source_wavelet(t)
 
@@ -411,31 +426,49 @@ def run_synthetic_mode():
             time_index=idx,
             path=f"results/figures/baseline_comparison_t_{idx}.png",
         )
+        plot_baseline_comparison(
+            reference=u_fdm,
+            baseline=u_layered,
+            time_index=idx,
+            path=f"results/figures/layered_baseline_comparison_t_{idx}.png",
+        )
 
-    print("Step 3: Training synthetic PINN...")
+    neural_model_name = "data_only_nn" if cfg.LAMBDA_PDE == 0 else "weak_pde_pinn"
+    neural_display_name = "Data-only NN" if cfg.LAMBDA_PDE == 0 else "Weak-PDE PINN"
+
+    print(f"Step 3: Training synthetic neural model ({neural_display_name})...")
     start_pinn = time.time()
-    model, loss_history = train_pinn(x, z, t, u_fdm, experiment_name="full")
+    model, loss_history = train_pinn(
+        x,
+        z,
+        t,
+        u_fdm,
+        experiment_name=neural_model_name,
+        lambda_pde=cfg.LAMBDA_PDE,
+    )
     pinn_training_time = time.time() - start_pinn
-    print(f"PINN training completed in {pinn_training_time:.2f} seconds")
+    print(f"Neural model training completed in {pinn_training_time:.2f} seconds")
 
     plot_loss_curve(loss_history, path="results/figures/loss_curve.png")
     save_loss_history(loss_history, "results/data/loss_history.csv")
 
     residual_summary = pd.DataFrame([
         {
-            "mode": "synthetic_full",
+            "mode": neural_model_name,
             **evaluate_pde_residual(model),
         }
     ])
     residual_summary.to_csv("results/data/pde_residual_summary.csv", index=False)
 
     metrics_rows = []
-    baseline_rows = []
+    homogeneous_baseline_rows = []
+    layered_baseline_rows = []
 
     for idx in snapshot_indices:
         pinn_snapshot = predict_snapshot(model, time_value=t[idx])
         snapshot_metrics = compute_all_metrics(pinn_snapshot, u_fdm[idx])
-        baseline_metrics = compute_all_metrics(u_homogeneous[idx], u_fdm[idx])
+        homogeneous_baseline_metrics = compute_all_metrics(u_homogeneous[idx], u_fdm[idx])
+        layered_baseline_metrics = compute_all_metrics(u_layered[idx], u_fdm[idx])
 
         metrics_rows.append(
             {
@@ -445,11 +478,19 @@ def run_synthetic_mode():
             }
         )
 
-        baseline_rows.append(
+        homogeneous_baseline_rows.append(
             {
                 "time_index": idx,
                 "time": float(t[idx]),
-                **baseline_metrics,
+                **homogeneous_baseline_metrics,
+            }
+        )
+
+        layered_baseline_rows.append(
+            {
+                "time_index": idx,
+                "time": float(t[idx]),
+                **layered_baseline_metrics,
             }
         )
 
@@ -461,10 +502,46 @@ def run_synthetic_mode():
         )
 
     df = pd.DataFrame(metrics_rows)
-    baseline_df = pd.DataFrame(baseline_rows)
+    homogeneous_baseline_df = pd.DataFrame(homogeneous_baseline_rows)
+    layered_baseline_df = pd.DataFrame(layered_baseline_rows)
 
     df.to_csv("results/data/metrics.csv", index=False)
-    baseline_df.to_csv("results/data/baseline_metrics.csv", index=False)
+    homogeneous_baseline_df.to_csv("results/data/homogeneous_baseline_metrics.csv", index=False)
+    layered_baseline_df.to_csv("results/data/layered_baseline_metrics.csv", index=False)
+
+    # Backward-compatible filename used by earlier report versions.
+    homogeneous_baseline_df.to_csv("results/data/baseline_metrics.csv", index=False)
+
+    comparison_rows = [
+        summarize_metric_table(
+            homogeneous_baseline_df,
+            model_name="Homogeneous FDM baseline",
+            role="traditional_simplified_baseline",
+            training_time_seconds=baseline_time,
+        ),
+        summarize_metric_table(
+            layered_baseline_df,
+            model_name="Layered FDM baseline",
+            role="traditional_layered_baseline",
+            training_time_seconds=layered_time,
+        ),
+        summarize_metric_table(
+            df,
+            model_name=neural_display_name,
+            role="neural_model",
+            training_time_seconds=pinn_training_time,
+        ),
+    ]
+
+    ablation_summary = None
+    if run_ablation:
+        ablation_summary = run_ablation_study(x, z, t, u_fdm, snapshot_indices)
+        if ablation_summary is not None and not ablation_summary.empty:
+            comparison_rows.extend(ablation_summary.to_dict("records"))
+
+    comparison_df = pd.DataFrame(comparison_rows)
+    comparison_df.to_csv("results/data/model_comparison_summary.csv", index=False)
+    save_model_comparison_figures(comparison_df)
 
     summary_df = pd.DataFrame([
         {
@@ -476,11 +553,17 @@ def run_synthetic_mode():
             "Mean_NRMSE": df["NRMSE"].mean(),
             "Mean_PSNR_dB": df["PSNR_dB"].mean(),
             "Mean_Correlation": df["Correlation"].mean(),
-            "Baseline_Mean_Relative_L2_Error": baseline_df["Relative_L2_Error"].mean(),
-            "Baseline_Mean_NRMSE": baseline_df["NRMSE"].mean(),
-            "Baseline_Mean_Correlation": baseline_df["Correlation"].mean(),
+            "Homogeneous_Mean_Relative_L2_Error": homogeneous_baseline_df["Relative_L2_Error"].mean(),
+            "Homogeneous_Mean_NRMSE": homogeneous_baseline_df["NRMSE"].mean(),
+            "Homogeneous_Mean_Correlation": homogeneous_baseline_df["Correlation"].mean(),
+            "Layered_Mean_Relative_L2_Error": layered_baseline_df["Relative_L2_Error"].mean(),
+            "Layered_Mean_NRMSE": layered_baseline_df["NRMSE"].mean(),
+            "Layered_Mean_Correlation": layered_baseline_df["Correlation"].mean(),
             "FDM_time_seconds": fdm_time,
             "Homogeneous_FDM_time_seconds": baseline_time,
+            "Layered_FDM_time_seconds": layered_time,
+            "Neural_model_name": neural_model_name,
+            "Neural_display_name": neural_display_name,
             "PINN_training_time_seconds": pinn_training_time,
         }
     ])
@@ -491,7 +574,10 @@ def run_synthetic_mode():
     print(df)
 
     print("\nHomogeneous baseline quantitative results:")
-    print(baseline_df)
+    print(homogeneous_baseline_df)
+
+    print("\nLayered baseline quantitative results:")
+    print(layered_baseline_df)
 
     print("\nSynthetic summary:")
     print(summary_df)
@@ -499,7 +585,70 @@ def run_synthetic_mode():
     print("\nPDE residual diagnostics:")
     print(residual_summary)
 
+    print("\nModel comparison summary:")
+    print(comparison_df)
+
     return df, summary_df
+
+
+def run_ablation_study(x, z, t, u_fdm, snapshot_indices):
+    """Run optional smaller ablation experiments for dissertation comparison tables."""
+    print("\nRunning optional ablation study...")
+    ablation_epochs = max(500, cfg.EPOCHS // 2)
+    experiments = [
+        {
+            "experiment": "data_only_no_fourier",
+            "model": "Data-only NN without Fourier",
+            "role": "ablation_fourier_off",
+            "use_fourier": False,
+            "lambda_pde": 0.0,
+        },
+        {
+            "experiment": "weak_pde_fourier",
+            "model": "Weak-PDE PINN",
+            "role": "ablation_weak_physics",
+            "use_fourier": True,
+            "lambda_pde": 1e-7,
+        },
+    ]
+
+    rows = []
+    for exp in experiments:
+        print(f"\nAblation experiment: {exp['experiment']}")
+        start = time.time()
+        model, loss_history = train_pinn(
+            x,
+            z,
+            t,
+            u_fdm,
+            experiment_name=exp["experiment"],
+            use_fourier=exp["use_fourier"],
+            lambda_pde=exp["lambda_pde"],
+            epochs=ablation_epochs,
+        )
+        training_time = time.time() - start
+        save_loss_history(loss_history, f"results/data/loss_history_{exp['experiment']}.csv")
+
+        metric_rows = []
+        for idx in snapshot_indices:
+            pred = predict_snapshot(model, time_value=t[idx])
+            metric_rows.append(compute_all_metrics(pred, u_fdm[idx]))
+
+        metric_df = pd.DataFrame(metric_rows)
+        row = summarize_metric_table(
+            metric_df,
+            model_name=exp["model"],
+            role=exp["role"],
+            training_time_seconds=training_time,
+        )
+        row["lambda_pde"] = exp["lambda_pde"]
+        row["use_fourier"] = exp["use_fourier"]
+        row.update(evaluate_pde_residual(model))
+        rows.append(row)
+
+    ablation_df = pd.DataFrame(rows)
+    ablation_df.to_csv("results/data/ablation_summary.csv", index=False)
+    return ablation_df
 
 
 def write_defense_report(synthetic_summary=None, real_summary=None):
@@ -545,14 +694,22 @@ def write_defense_report(synthetic_summary=None, real_summary=None):
         "- results/figures/velocity_model.png",
         "- results/figures/fdm_snapshot_*.png",
         "- results/figures/baseline_comparison_t_*.png",
+        "- results/figures/layered_baseline_comparison_t_*.png",
+        "- results/figures/layered_velocity_model.png",
         "- results/figures/ricker_wavelet.png",
         "- results/figures/comparison_t_*.png",
         "- results/figures/loss_curve.png",
         "- results/data/metrics.csv",
         "- results/data/synthetic_summary.csv",
-        "- results/data/baseline_metrics.csv",
+        "- results/data/homogeneous_baseline_metrics.csv",
+        "- results/data/layered_baseline_metrics.csv",
         "- results/data/pde_residual_summary.csv",
         "- results/data/fdm_metadata.csv",
+        "- results/data/model_comparison_summary.csv",
+        "- results/figures/comparison_relative_l2_bar.png",
+        "- results/figures/comparison_correlation_bar.png",
+        "- results/figures/comparison_energy_ratio_bar.png",
+        "- results/data/ablation_summary.csv, if ablation mode was executed",
         "- results/data/real_metrics.csv, if real mode was executed",
         "",
         "## Important limitation",
@@ -569,7 +726,7 @@ def write_defense_report(synthetic_summary=None, real_summary=None):
         lines[idx+1:idx+1] = [
             "## Added baseline validation",
             "",
-            "A homogeneous-medium FDM simulation is included as a baseline. This allows the defense to compare the proposed PINN result not only against the heterogeneous reference solution, but also against a simplified physical model that ignores subsurface heterogeneity.",
+            "Homogeneous and layered FDM simulations are included as traditional baselines. This allows the defense to compare the neural result against simplified physical models and against the heterogeneous reference solution with anomalies.",
             "",
         ]
     except ValueError:
@@ -578,9 +735,9 @@ def write_defense_report(synthetic_summary=None, real_summary=None):
         file.write("\n".join(lines))
 
 
-def run_all_mode():
+def run_all_mode(run_ablation=False):
     print("Running full defense pipeline: synthetic experiment + real-data reconstruction if available.")
-    synthetic_metrics, synthetic_summary = run_synthetic_mode()
+    synthetic_metrics, synthetic_summary = run_synthetic_mode(run_ablation=run_ablation)
 
     real_summary = None
     try:
@@ -602,6 +759,7 @@ def run_all_mode():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=["synthetic", "real", "all"], default="all")
+    parser.add_argument("--ablation", action="store_true", help="Run optional ablation experiments. Slower but stronger for dissertation tables.")
     args = parser.parse_args()
 
     os.makedirs("results/figures", exist_ok=True)
@@ -614,11 +772,11 @@ def main():
         real_summary = run_real_mode()
         write_defense_report(real_summary=real_summary)
     elif args.mode == "synthetic":
-        _, synthetic_summary = run_synthetic_mode()
+        _, synthetic_summary = run_synthetic_mode(run_ablation=args.ablation)
         synthetic_summary.to_csv("results/data/summary.csv", index=False)
         write_defense_report(synthetic_summary=synthetic_summary)
     else:
-        run_all_mode()
+        run_all_mode(run_ablation=args.ablation)
 
     print("\nProject completed.")
     print("Generated figures are saved in: results/figures")

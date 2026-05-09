@@ -97,10 +97,12 @@ def prepare_training_data(x, z, t, u_fdm, reference_scale):
     flat_abs = np.abs(u_fdm).reshape(-1)
     all_indices = np.arange(flat_abs.size)
 
-    n_high = N_DATA // 2
+    # More high-amplitude samples help the network learn visible wavefronts,
+    # while uniform samples still cover quiet/background regions.
+    n_high = int(0.8 * N_DATA)
     n_uniform = N_DATA - n_high
 
-    threshold = np.percentile(flat_abs, 70)
+    threshold = np.percentile(flat_abs, 65)
     high_amplitude_indices = np.where(flat_abs >= threshold)[0]
 
     if len(high_amplitude_indices) == 0:
@@ -201,10 +203,10 @@ def train_pinn(
         patience=250,
     )
 
-    data_xzt, data_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
     print(f"Experiment: {experiment_name}")
     print(f"Reference scale used for normalized training: {reference_scale:.6e}")
-    print(f"Normalized training data range: min={data_u.min().item():.6e}, max={data_u.max().item():.6e}")
+    preview_xzt, preview_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
+    print(f"Normalized training data range: min={preview_u.min().item():.6e}, max={preview_u.max().item():.6e}")
     print(f"PINN training device: {DEVICE}")
 
     loss_history = {
@@ -213,6 +215,7 @@ def train_pinn(
         "data": [],
         "ic": [],
         "bc": [],
+        "amplitude": [],
         "lr": [],
     }
 
@@ -220,12 +223,17 @@ def train_pinn(
         model.train()
         optimizer.zero_grad(set_to_none=True)
 
+        # Resample supervised FDM points every epoch. This prevents the model from
+        # memorizing one fixed subset and exploding between sampled points.
+        data_xzt, data_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
+
         xzt_c = sample_collocation_points()
         residual = pde_residual(model, xzt_c)
         loss_pde = torch.mean(residual ** 2)
 
         pred_data = model(data_xzt)
         loss_data = torch.mean((pred_data - data_u) ** 2)
+        loss_amp = torch.mean(pred_data ** 2)
 
         xzt_i = sample_initial_points()
         pred_i = model(xzt_i)
@@ -240,6 +248,7 @@ def train_pinn(
             + LAMBDA_DATA * loss_data
             + LAMBDA_IC * loss_ic
             + LAMBDA_BC * loss_bc
+            + LAMBDA_AMPLITUDE * loss_amp
         )
 
         loss.backward()
@@ -255,6 +264,7 @@ def train_pinn(
         loss_history["data"].append(float(loss_data.detach().cpu()))
         loss_history["ic"].append(float(loss_ic.detach().cpu()))
         loss_history["bc"].append(float(loss_bc.detach().cpu()))
+        loss_history["amplitude"].append(float(loss_amp.detach().cpu()))
         loss_history["lr"].append(float(optimizer.param_groups[0]["lr"]))
 
         if epoch % 250 == 0 or epoch == num_epochs - 1:
@@ -265,9 +275,12 @@ def train_pinn(
                 f"Data: {loss_data.item():.6e} | "
                 f"IC: {loss_ic.item():.6e} | "
                 f"BC: {loss_bc.item():.6e} | "
+                f"Amp: {loss_amp.item():.6e} | "
                 f"LR: {optimizer.param_groups[0]['lr']:.2e}"
             )
 
+    # Final supervised sample for optional LBFGS
+    data_xzt, data_u = prepare_training_data(x, z, t, u_fdm, reference_scale)
     if USE_LBFGS_REFINEMENT:
         _run_lbfgs_refinement(model, data_xzt, data_u, loss_history)
 
@@ -304,6 +317,7 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
 
         pred_data = model(data_xzt)
         loss_data = torch.mean((pred_data - data_u) ** 2)
+        loss_amp = torch.mean(pred_data ** 2)
 
         xzt_i = sample_initial_points()
         loss_ic = torch.mean(model(xzt_i) ** 2)
@@ -316,6 +330,7 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
             + LAMBDA_DATA * loss_data
             + LAMBDA_IC * loss_ic
             + LAMBDA_BC * loss_bc
+            + LAMBDA_AMPLITUDE * loss_amp
         )
         loss.backward()
         return loss
@@ -326,6 +341,13 @@ def _run_lbfgs_refinement(model, data_xzt, data_u, loss_history):
 
 def evaluate_pde_residual(model, n_points=5000):
     """Evaluate PDE residual statistics on unseen random collocation points."""
+    if getattr(model, "lambda_pde", LAMBDA_PDE) == 0:
+        return {
+            "Residual_MAE": np.nan,
+            "Residual_RMSE": np.nan,
+            "Residual_MaxAbs": np.nan,
+        }
+
     model.eval()
     xzt_c = sample_collocation_points()
     if xzt_c.shape[0] > n_points:
